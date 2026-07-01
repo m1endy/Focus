@@ -11,8 +11,6 @@ import com.focuslock.app.data.LockRepository
 
 class BlockingService : AccessibilityService() {
 
-    private var lastBlockedPackage: String? = null
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         startForegroundNotification()
@@ -24,26 +22,19 @@ class BlockingService : AccessibilityService() {
         if (pkg == packageName) return
 
         val (isBlocking, endTime, blockedPackages) = LockRepository.readBlockingState(this)
-
-        if (!isBlocking) {
-            lastBlockedPackage = null
-            return
-        }
+        if (!isBlocking) return
 
         if (System.currentTimeMillis() >= endTime) {
             LockRepository.clearBlockingState(this)
             stopService(Intent(this, OverlayService::class.java))
-            lastBlockedPackage = null
             return
         }
 
         val shouldBlock = pkg in blockedPackages || pkg == "com.android.settings"
-        if (shouldBlock && pkg != lastBlockedPackage) {
-            lastBlockedPackage = pkg
-            val intent = Intent(this, OverlayService::class.java)
-            startForegroundService(intent)
-        } else if (!shouldBlock) {
-            lastBlockedPackage = null
+        if (shouldBlock) {
+            // Безопасно вызывать многократно: OverlayService сам не пересоздаёт
+            // окно, если оно уже показано (см. onStartCommand).
+            startForegroundService(Intent(this, OverlayService::class.java))
         }
     }
 
@@ -68,8 +59,6 @@ class BlockingService : AccessibilityService() {
             .setOngoing(true)
             .setSilent(true)
             .build()
-        // AccessibilityService не является Service с foregroundServiceType напрямую в этом методе,
-        // уведомление публикуется через NotificationManager для видимости пользователю.
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, notification)
     }
