@@ -8,8 +8,11 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -82,6 +85,16 @@ class OverlayService : Service() {
             return
         }
 
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(
+                this,
+                "FocusLock: разрешите «Отображение поверх других приложений», иначе блокировка не сработает",
+                Toast.LENGTH_LONG
+            ).show()
+            stopSelf()
+            return
+        }
+
         val owner = OverlayLifecycleOwner()
         owner.performRestore()
         owner.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
@@ -92,8 +105,6 @@ class OverlayService : Service() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         windowManager = wm
 
-        // Без FLAG_NOT_FOCUSABLE и FLAG_NOT_TOUCH_MODAL: оверлей перехватывает
-        // все касания и клавиши (в т.ч. Back), не пропуская их дальше.
         val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -105,7 +116,12 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.CENTER }
 
-        val view = ComposeView(this).apply {
+        val view = object : ComposeView(this) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (event.keyCode == KeyEvent.KEYCODE_BACK) return true
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
             setViewTreeLifecycleOwner(owner)
             setViewTreeViewModelStoreOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
@@ -128,7 +144,6 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         removeOverlay()
-        // Самовосстановление: если блокировка ещё активна, а оверлей уничтожен — поднимаем снова
         val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
         if (isBlocking && System.currentTimeMillis() < endTime) {
             val restart = Intent(this, OverlayService::class.java)
