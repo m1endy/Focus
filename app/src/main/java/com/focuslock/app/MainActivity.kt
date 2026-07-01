@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -34,10 +36,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.focuslock.app.data.AppInfo
 import com.focuslock.app.data.MainViewModel
 import com.focuslock.app.ui.*
@@ -67,6 +74,9 @@ fun isAccessibilityServiceEnabled(context: android.content.Context): Boolean {
     }
     return false
 }
+
+fun hasOverlayPermission(context: android.content.Context): Boolean =
+    Settings.canDrawOverlays(context)
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -99,8 +109,27 @@ fun MainScreen(viewModel: MainViewModel) {
     val selected by viewModel.selectedPackages.collectAsState()
     var search by remember { mutableStateOf("") }
     var durationMinutes by remember { mutableStateOf(30) }
+    var durationText by remember { mutableStateOf("30") }
     var showAccessibilityDialog by remember { mutableStateOf(false) }
+    var showOverlayDialog by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
+
+    var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
+    var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
+
+    // Разрешения — особые, выдаются в системных настройках. Перепроверяем их
+    // каждый раз, когда пользователь возвращается в приложение (например, из настроек).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                accessibilityGranted = isAccessibilityServiceEnabled(context)
+                overlayGranted = hasOverlayPermission(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val filtered = remember(apps, search) {
         if (search.isBlank()) apps else apps.filter { it.label.contains(search, ignoreCase = true) }
@@ -112,9 +141,10 @@ fun MainScreen(viewModel: MainViewModel) {
             delay(1000)
             countdown = c - 1
         } else {
+            // Оверлей блокировки запускает исключительно BlockingService, когда
+            // видит открытие заблокированного приложения — здесь мы только
+            // включаем режим блокировки в хранилище.
             viewModel.startBlocking(durationMinutes * 60_000L)
-            val intent = Intent(context, OverlayService::class.java)
-            context.startForegroundService(intent)
             countdown = null
         }
     }
@@ -134,19 +164,58 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
             )
 
-            // Duration selector
-            Row(
-                modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Время блокировки", color = TextSecondary, fontSize = 12.sp)
-                    Text("$durationMinutes мин", color = Cyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (!accessibilityGranted || !overlayGranted) {
+                PermissionsCard(
+                    accessibilityGranted = accessibilityGranted,
+                    overlayGranted = overlayGranted,
+                    onAccessibilityClick = { showAccessibilityDialog = true },
+                    onOverlayClick = { showOverlayDialog = true }
+                )
+                Spacer(Modifier.height(16.dp))
+            }
+
+            // Время блокировки — свой ввод + быстрые пресеты
+            Column(modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp)) {
+                Text("Время блокировки", color = TextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = {
+                        val v = (durationMinutes - 5).coerceAtLeast(1)
+                        durationMinutes = v; durationText = v.toString()
+                    }) { Icon(Icons.Default.Remove, null, tint = Cyan) }
+
+                    OutlinedTextField(
+                        value = durationText,
+                        onValueChange = { new ->
+                            val digits = new.filter { it.isDigit() }.take(4)
+                            durationText = digits
+                            digits.toIntOrNull()?.let { if (it in 1..999) durationMinutes = it }
+                        },
+                        modifier = Modifier.width(110.dp),
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            color = Cyan, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        ),
+                        suffix = { Text("мин", color = TextSecondary, fontSize = 13.sp) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Cyan,
+                            unfocusedBorderColor = TextSecondary.copy(alpha = 0.3f),
+                            cursorColor = Cyan
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    IconButton(onClick = {
+                        val v = (durationMinutes + 5).coerceAtMost(999)
+                        durationMinutes = v; durationText = v.toString()
+                    }) { Icon(Icons.Default.Add, null, tint = Cyan) }
                 }
+                Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(15, 30, 60, 120).forEach { m ->
-                        DurationChip(m, m == durationMinutes) { durationMinutes = m }
+                        DurationChip(m, m == durationMinutes) { durationMinutes = m; durationText = m.toString() }
                     }
                 }
             }
@@ -198,14 +267,14 @@ fun MainScreen(viewModel: MainViewModel) {
 
         Button(
             onClick = {
-                if (selected.isEmpty()) return@Button
-                if (!isAccessibilityServiceEnabled(context)) {
-                    showAccessibilityDialog = true
-                } else {
-                    countdown = 3
+                if (selected.isEmpty() || durationMinutes <= 0) return@Button
+                when {
+                    !accessibilityGranted -> showAccessibilityDialog = true
+                    !overlayGranted -> showOverlayDialog = true
+                    else -> countdown = 3
                 }
             },
-            enabled = selected.isNotEmpty() && countdown == null,
+            enabled = selected.isNotEmpty() && durationMinutes > 0 && countdown == null,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(20.dp)
@@ -222,16 +291,22 @@ fun MainScreen(viewModel: MainViewModel) {
 
         countdown?.let { c ->
             Box(
-                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)),
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.9f)),
                 contentAlignment = Alignment.Center
             ) {
-                AnimatedContent(targetState = c, label = "countdown") { value ->
-                    Text(
-                        text = if (value > 0) "$value" else "🔒",
-                        color = Cyan,
-                        fontSize = 96.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    AnimatedContent(targetState = c, label = "countdown") { value ->
+                        Text(
+                            text = if (value > 0) "$value" else "🔒",
+                            color = Cyan,
+                            fontSize = 96.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(Modifier.height(28.dp))
+                    TextButton(onClick = { countdown = null }) {
+                        Text("Отмена", color = TextSecondary, fontSize = 15.sp)
+                    }
                 }
             }
         }
@@ -260,6 +335,75 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
             )
         }
+
+        if (showOverlayDialog) {
+            AlertDialog(
+                onDismissRequest = { showOverlayDialog = false },
+                containerColor = CardBlack,
+                title = { Text("Нужен доступ", color = TextPrimary) },
+                text = {
+                    Text(
+                        "Чтобы экран блокировки мог появляться поверх других приложений, разрешите FocusLock «Отображение поверх других приложений».",
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showOverlayDialog = false
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }) { Text("Открыть настройки", color = Cyan) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showOverlayDialog = false }) {
+                        Text("Отмена", color = TextSecondary)
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun PermissionsCard(
+    accessibilityGranted: Boolean,
+    overlayGranted: Boolean,
+    onAccessibilityClick: () -> Unit,
+    onOverlayClick: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp)) {
+        Text("Нужна настройка перед стартом", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        PermissionRow("Специальные возможности", accessibilityGranted, onAccessibilityClick)
+        Spacer(Modifier.height(8.dp))
+        PermissionRow("Поверх других приложений", overlayGranted, onOverlayClick)
+    }
+}
+
+@Composable
+fun PermissionRow(label: String, granted: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !granted) { onClick() },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (granted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                null,
+                tint = if (granted) Cyan else DangerRed,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(label, color = TextPrimary, fontSize = 14.sp)
+        }
+        if (!granted) Text("Включить", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -343,13 +487,6 @@ fun ActiveBlockScreen(endTime: Long) {
             val m = (remaining % 3600) / 60
             val s = remaining % 60
             Text(
-                String.format("%02d:%02d:%02d", h, m, s),
-                color = Cyan,
-                fontSize = 42.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
                 "Заблокированные приложения недоступны до конца таймера",
                 color = TextSecondary,
                 fontSize = 13.sp,
@@ -359,3 +496,4 @@ fun ActiveBlockScreen(endTime: Long) {
         }
     }
 }
+   
