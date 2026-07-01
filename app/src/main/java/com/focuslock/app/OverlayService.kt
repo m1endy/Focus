@@ -11,7 +11,10 @@ import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -63,7 +66,7 @@ private class OverlayLifecycleOwner :
 class OverlayService : Service() {
 
     private var windowManager: WindowManager? = null
-    private var overlayView: ComposeView? = null
+    private var overlayView: View? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -116,12 +119,9 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.CENTER }
 
-        val view = object : ComposeView(this) {
-            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-                if (event.keyCode == KeyEvent.KEYCODE_BACK) return true
-                return super.dispatchKeyEvent(event)
-            }
-        }.apply {
+        // ComposeView — финальный класс, его нельзя наследовать напрямую.
+        // Оборачиваем в FrameLayout и перехватываем Back уже на нём.
+        val composeView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(owner)
             setViewTreeViewModelStoreOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
@@ -132,10 +132,22 @@ class OverlayService : Service() {
                 })
             }
         }
-        overlayView = view
+
+        val rootView = object : FrameLayout(this) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (event.keyCode == KeyEvent.KEYCODE_BACK) return true
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
+            addView(
+                composeView,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+        }
+        overlayView = rootView
 
         try {
-            wm.addView(view, params)
+            wm.addView(rootView, params)
         } catch (e: Exception) {
             stopSelf()
         }
