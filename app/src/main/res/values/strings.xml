@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">FocusLock</string>
+    <string name="accessibility_service_description">FocusLock отслеживает запуск приложений, чтобы блокировать доступ к выбранным приложениям на заданное время.</string>
+</resources>
