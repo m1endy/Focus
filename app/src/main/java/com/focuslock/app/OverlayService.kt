@@ -19,6 +19,8 @@ import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -42,6 +44,9 @@ import com.focuslock.app.ui.Cyan
 import com.focuslock.app.ui.CyanDim
 import com.focuslock.app.ui.DeepBlack
 import com.focuslock.app.ui.TextSecondary
+import com.focuslock.app.ui.OrganicBackground
+import com.focuslock.app.ui.GlassIconBadge
+import com.focuslock.app.ui.glassCard
 import kotlinx.coroutines.delay
 
 /** Минимальный владелец жизненного цикла для ComposeView вне Activity */
@@ -248,42 +253,56 @@ fun OverlayContent(endTime: Long, onExpired: () -> Unit) {
     )
 
     Surface(modifier = Modifier.fillMaxSize(), color = DeepBlack) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(260.dp)) {
-                androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
-                    val stroke = 14.dp.toPx()
-                    drawArc(
-                        color = CyanDim.copy(alpha = 0.25f),
-                        startAngle = -90f,
-                        sweepAngle = 360f,
-                        useCenter = false,
-                        style = Stroke(width = stroke)
-                    )
-                    drawArc(
-                        brush = Brush.sweepGradient(listOf(Cyan, CyanDim, Cyan)),
-                        startAngle = -90f,
-                        sweepAngle = 360f * progress,
-                        useCenter = false,
-                        style = Stroke(width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                    )
+        OrganicBackground(contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.glassCard(32).padding(horizontal = 40.dp, vertical = 36.dp)
+            ) {
+                GlassIconBadge(Icons.Default.Lock, sizeDp = 58)
+                Spacer(Modifier.height(22.dp))
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(220.dp)) {
+                    androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                        val stroke = 12.dp.toPx()
+                        drawArc(
+                            color = CyanDim.copy(alpha = 0.22f),
+                            startAngle = -90f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            style = Stroke(width = stroke)
+                        )
+                        drawArc(
+                            brush = Brush.sweepGradient(listOf(Cyan, CyanDim, Cyan)),
+                            startAngle = -90f,
+                            sweepAngle = 360f * progress,
+                            useCenter = false,
+                            style = Stroke(width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                        )
+                    }
+                    val h = remaining / 3600
+                    val m = (remaining % 3600) / 60
+                    val s = remaining % 60
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = String.format("%02d:%02d:%02d", h, m, s),
+                            color = Cyan.copy(alpha = glow),
+                            fontSize = 34.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Заблокировано",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                    }
                 }
-                val h = remaining / 3600
-                val m = (remaining % 3600) / 60
-                val s = remaining % 60
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = String.format("%02d:%02d:%02d", h, m, s),
-                        color = Cyan.copy(alpha = glow),
-                        fontSize = 34.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "🔒 Заблокировано",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Глубокий вдох. Фокус того стоит",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
             }
         }
     }
