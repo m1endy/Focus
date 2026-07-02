@@ -159,7 +159,7 @@ fun MainScreen(viewModel: MainViewModel) {
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(ScreenGradient)) {
+    OrganicBackground {
         Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
             Text(
                 "FocusLock",
@@ -448,13 +448,12 @@ fun PermissionRow(label: String, granted: Boolean, onClick: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                if (granted) Icons.Default.CheckCircle else Icons.Default.Warning,
-                null,
-                tint = if (granted) Cyan else DangerRed,
-                modifier = Modifier.size(18.dp)
+            GlassIconBadge(
+                icon = if (granted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                sizeDp = 30,
+                accent = if (granted) Cyan else DangerRed
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(10.dp))
             Text(label, color = TextPrimary, fontSize = 14.sp)
         }
         if (!granted) Text("Включить", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -531,12 +530,9 @@ fun ActiveBlockScreen(endTime: Long, onExpired: () -> Unit) {
 
     BackHandler(enabled = true) { /* блокировка активна — назад не работает */ }
 
-    Box(
-        modifier = Modifier.fillMaxSize().background(ScreenGradient),
-        contentAlignment = Alignment.Center
-    ) {
+    OrganicBackground(contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Default.Lock, null, tint = Cyan, modifier = Modifier.size(56.dp))
+            GlassIconBadge(Icons.Default.Lock, sizeDp = 84)
             Spacer(Modifier.height(20.dp))
             Text("Фокус активен", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
