@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
@@ -168,8 +169,8 @@ fun GrassFernSilhouette(modifier: Modifier = Modifier, heightFraction: Float = 0
             val color = lerp(FernDeep, FernLight, b.mix).copy(alpha = b.alpha)
             val path = Path().apply {
                 moveTo(baseX - bladeW / 2f, h)
-                quadraticTo(baseX + sway * 0.6f, h - bladeH * 0.55f, tipX, h - bladeH)
-                quadraticTo(baseX + sway * 0.6f + bladeW, h - bladeH * 0.55f, baseX + bladeW / 2f, h)
+                quadraticBezierTo(baseX + sway * 0.6f, h - bladeH * 0.55f, tipX, h - bladeH)
+                quadraticBezierTo(baseX + sway * 0.6f + bladeW, h - bladeH * 0.55f, baseX + bladeW / 2f, h)
                 close()
             }
             drawPath(path, color = color)
