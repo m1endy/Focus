@@ -14,6 +14,7 @@ class BlockingService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         startForegroundNotification()
+        LockRepository.writeDebugEvent(this, "Служба подключена")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -24,6 +25,8 @@ class BlockingService : AccessibilityService() {
         val (isBlocking, endTime, blockedPackages) = LockRepository.readBlockingState(this)
         if (!isBlocking) return
 
+        LockRepository.writeDebugEvent(this, "Вижу пакет: $pkg")
+
         if (System.currentTimeMillis() >= endTime) {
             LockRepository.clearBlockingState(this)
             stopService(Intent(this, OverlayService::class.java))
@@ -31,10 +34,20 @@ class BlockingService : AccessibilityService() {
         }
 
         val shouldBlock = pkg in blockedPackages || pkg == "com.android.settings"
+        LockRepository.setCurrentlyOnBlockedApp(this, shouldBlock)
+
         if (shouldBlock) {
+            LockRepository.writeDebugEvent(this, "Блокирую: $pkg → запускаю оверлей")
             // Безопасно вызывать многократно: OverlayService сам не пересоздаёт
-            // окно, если оно уже показано (см. onStartCommand).
+            // окно, если оно уже показано (см. onStartCommand). Это исключает
+            // ситуацию, когда оверлей пропущен из-за ошибочной дедупликации.
             startForegroundService(Intent(this, OverlayService::class.java))
+        } else {
+            LockRepository.writeDebugEvent(this, "Не заблокировано: $pkg → снимаю оверлей")
+            // Пользователь ушёл из заблокированного приложения (например, на
+            // Home) — оверлей больше не нужен именно сейчас, хотя таймер
+            // фокус-сессии продолжает идти в фоне.
+            stopService(Intent(this, OverlayService::class.java))
         }
     }
 
@@ -59,6 +72,8 @@ class BlockingService : AccessibilityService() {
             .setOngoing(true)
             .setSilent(true)
             .build()
+        // AccessibilityService не является Service с foregroundServiceType напрямую в этом методе,
+        // уведомление публикуется через NotificationManager для видимости пользователю.
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, notification)
     }
