@@ -82,13 +82,18 @@ class OverlayService : Service() {
     }
 
     private fun showOverlay() {
+        LockRepository.writeDebugEvent(this, "showOverlay() запущен")
         val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
         if (!isBlocking) {
+            LockRepository.writeDebugEvent(this, "showOverlay: блокировка уже не активна")
             stopSelf()
             return
         }
 
         if (!Settings.canDrawOverlays(this)) {
+            // Без этого разрешения окно не может быть добавлено — сообщаем и выходим,
+            // вместо того чтобы тихо ничего не делать.
+            LockRepository.writeDebugEvent(this, "НЕТ прав на оверлей (canDrawOverlays=false)")
             Toast.makeText(
                 this,
                 "FocusLock: разрешите «Отображение поверх других приложений», иначе блокировка не сработает",
@@ -108,6 +113,8 @@ class OverlayService : Service() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         windowManager = wm
 
+        // Без FLAG_NOT_FOCUSABLE и FLAG_NOT_TOUCH_MODAL: оверлей перехватывает
+        // все касания и клавиши (в т.ч. Back), не пропуская их дальше.
         val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -148,7 +155,9 @@ class OverlayService : Service() {
 
         try {
             wm.addView(rootView, params)
+            LockRepository.writeDebugEvent(this, "Оверлей добавлен успешно")
         } catch (e: Exception) {
+            LockRepository.writeDebugEvent(this, "Ошибка addView: ${e.javaClass.simpleName}: ${e.message}")
             stopSelf()
         }
     }
@@ -156,6 +165,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         removeOverlay()
+        // Самовосстановление: если блокировка ещё активна, а оверлей уничтожен — поднимаем снова
         val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
         if (isBlocking && System.currentTimeMillis() < endTime) {
             val restart = Intent(this, OverlayService::class.java)
