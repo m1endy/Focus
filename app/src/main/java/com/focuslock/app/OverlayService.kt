@@ -89,6 +89,14 @@ class OverlayService : Service() {
             stopSelf()
             return
         }
+        if (!LockRepository.isCurrentlyOnBlockedApp(this)) {
+            // Пользователь уже успел уйти из заблокированного приложения раньше,
+            // чем сервис запустился (например, быстрое переключение) — не
+            // показываем оверлей поверх того, что сейчас на самом деле открыто.
+            LockRepository.writeDebugEvent(this, "showOverlay: приложение уже не заблокировано")
+            stopSelf()
+            return
+        }
 
         if (!Settings.canDrawOverlays(this)) {
             // Без этого разрешения окно не может быть добавлено — сообщаем и выходим,
@@ -171,9 +179,14 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         removeOverlay()
-        // Самовосстановление: если блокировка ещё активна, а оверлей уничтожен — поднимаем снова
+        // Самовосстановление нужно ТОЛЬКО если пользователь по-прежнему на
+        // заблокированном приложении (например, систему убила службу в фоне).
+        // Раньше здесь проверялся только общий таймер сессии (isBlocking),
+        // из-за чего оверлей поднимался заново даже после ухода на Home —
+        // и блокировка не отпускала пользователя до конца всего таймера.
         val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
-        if (isBlocking && System.currentTimeMillis() < endTime) {
+        val stillOnBlockedApp = LockRepository.isCurrentlyOnBlockedApp(this)
+        if (isBlocking && System.currentTimeMillis() < endTime && stillOnBlockedApp) {
             val restart = Intent(this, OverlayService::class.java)
             startForegroundService(restart)
         }
