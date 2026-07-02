@@ -129,9 +129,6 @@ class OverlayService : Service() {
         // ComposeView — финальный класс, его нельзя наследовать напрямую.
         // Оборачиваем в FrameLayout и перехватываем Back уже на нём.
         val composeView = ComposeView(this).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeViewModelStoreOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
             setContent {
                 OverlayContent(endTime = endTime, onExpired = {
                     LockRepository.clearBlockingState(this@OverlayService)
@@ -140,12 +137,21 @@ class OverlayService : Service() {
             }
         }
 
+        // Владельца жизненного цикла нужно вешать на КОРНЕВОЙ view окна (rootView),
+        // а не на дочерний composeView: Compose при подключении окна ищет
+        // ViewTreeLifecycleOwner именно у view.rootView, поэтому привязка к
+        // composeView (что было раньше) приводила к падению с
+        // IllegalStateException в момент отрисовки — оверлей "добавлялся",
+        // но тут же крашился, так и не показавшись.
         val rootView = object : FrameLayout(this) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                 if (event.keyCode == KeyEvent.KEYCODE_BACK) return true
                 return super.dispatchKeyEvent(event)
             }
         }.apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
             addView(
                 composeView,
                 ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
