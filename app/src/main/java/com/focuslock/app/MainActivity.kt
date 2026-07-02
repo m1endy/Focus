@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = DeepBlack) {
                     Crossfade(targetState = isBlocking, label = "nav") { blocking ->
                         if (blocking) {
-                            ActiveBlockScreen(endTime = endTime)
+                            ActiveBlockScreen(endTime = endTime, onExpired = { viewModel.stopBlocking() })
                         } else {
                             MainScreen(viewModel = viewModel)
                         }
@@ -113,6 +113,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
     val apps by viewModel.installedApps.collectAsState()
     val selected by viewModel.selectedPackages.collectAsState()
+    val debugLastEvent by viewModel.debugLastEvent.collectAsState()
     var search by remember { mutableStateOf("") }
     var durationMinutes by remember { mutableStateOf(30) }
     var durationText by remember { mutableStateOf("30") }
@@ -251,6 +252,13 @@ fun MainScreen(viewModel: MainViewModel) {
             )
 
             Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Диагностика: $debugLastEvent",
+                color = TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
 
             Text(
                 "Выбрано: ${selected.size}",
@@ -508,7 +516,7 @@ fun AppRow(app: AppInfo, checked: Boolean, onToggle: () -> Unit) {
 }
 
 @Composable
-fun ActiveBlockScreen(endTime: Long) {
+fun ActiveBlockScreen(endTime: Long, onExpired: () -> Unit) {
     var remaining by remember { mutableStateOf(((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)) }
 
     LaunchedEffect(endTime) {
@@ -516,6 +524,9 @@ fun ActiveBlockScreen(endTime: Long) {
             delay(1000)
             remaining = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
         }
+        // Таймер дошёл до нуля прямо в приложении — снимаем блокировку сами,
+        // не полагаясь на то, что оверлей когда-либо успел сработать.
+        onExpired()
     }
 
     BackHandler(enabled = true) { /* блокировка активна — назад не работает */ }
