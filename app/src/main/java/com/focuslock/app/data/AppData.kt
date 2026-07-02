@@ -23,6 +23,7 @@ object Keys {
     val BLOCKED_PACKAGES = stringSetPreferencesKey("blocked_packages")
     val END_TIME = longPreferencesKey("end_time")
     val IS_BLOCKING = booleanPreferencesKey("is_blocking")
+    val DEBUG_LAST_EVENT = stringPreferencesKey("debug_last_event")
 }
 
 class LockRepository(private val context: Context) {
@@ -31,6 +32,7 @@ class LockRepository(private val context: Context) {
     }
     val endTime: Flow<Long> = context.dataStore.data.map { it[Keys.END_TIME] ?: 0L }
     val isBlocking: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_BLOCKING] ?: false }
+    val debugLastEvent: Flow<String> = context.dataStore.data.map { it[Keys.DEBUG_LAST_EVENT] ?: "пока нет событий" }
 
     suspend fun saveSelection(packages: Set<String>) {
         context.dataStore.edit { it[Keys.BLOCKED_PACKAGES] = packages }
@@ -71,6 +73,16 @@ class LockRepository(private val context: Context) {
                 }
             }
         }
+
+        // Пишет короткий след последнего события — видно в приложении на экране
+        // диагностики, без adb и логов. Только для отладки блокировки.
+        fun writeDebugEvent(context: Context, message: String) {
+            val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            kotlinx.coroutines.runBlocking {
+                context.dataStore.edit { it[Keys.DEBUG_LAST_EVENT] = "$message · $time" }
+            }
+        }
     }
 }
 
@@ -109,6 +121,9 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
     val endTime: StateFlow<Long> = repo.endTime.stateIn(
         viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, 0L
     )
+    val debugLastEvent: StateFlow<String> = repo.debugLastEvent.stateIn(
+        viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, "пока нет событий"
+    )
 
     init {
         viewModelScope.launch {
@@ -128,5 +143,12 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun startBlocking(durationMillis: Long) {
         viewModelScope.launch { repo.startBlock(durationMillis) }
+    }
+
+    // Подстраховка: если оверлей ни разу не сработал (например, служба не
+    // получает события), таймер внутри самого приложения всё равно должен
+    // сам снять блокировку по истечении времени, а не зависать на 00:00.
+    fun stopBlocking() {
+        viewModelScope.launch { repo.stopBlock() }
     }
 }
