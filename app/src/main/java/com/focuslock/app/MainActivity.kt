@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
 import androidx.activity.ComponentActivity
@@ -78,6 +79,11 @@ fun isAccessibilityServiceEnabled(context: android.content.Context): Boolean {
 fun hasOverlayPermission(context: android.content.Context): Boolean =
     Settings.canDrawOverlays(context)
 
+fun hasBatteryOptimizationExemption(context: android.content.Context): Boolean {
+    val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
@@ -112,10 +118,12 @@ fun MainScreen(viewModel: MainViewModel) {
     var durationText by remember { mutableStateOf("30") }
     var showAccessibilityDialog by remember { mutableStateOf(false) }
     var showOverlayDialog by remember { mutableStateOf(false) }
+    var showBatteryDialog by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
 
     var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
+    var batteryOptGranted by remember { mutableStateOf(hasBatteryOptimizationExemption(context)) }
 
     // Разрешения — особые, выдаются в системных настройках. Перепроверяем их
     // каждый раз, когда пользователь возвращается в приложение (например, из настроек).
@@ -125,6 +133,7 @@ fun MainScreen(viewModel: MainViewModel) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 accessibilityGranted = isAccessibilityServiceEnabled(context)
                 overlayGranted = hasOverlayPermission(context)
+                batteryOptGranted = hasBatteryOptimizationExemption(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -164,12 +173,14 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
             )
 
-            if (!accessibilityGranted || !overlayGranted) {
+            if (!accessibilityGranted || !overlayGranted || !batteryOptGranted) {
                 PermissionsCard(
                     accessibilityGranted = accessibilityGranted,
                     overlayGranted = overlayGranted,
+                    batteryOptGranted = batteryOptGranted,
                     onAccessibilityClick = { showAccessibilityDialog = true },
-                    onOverlayClick = { showOverlayDialog = true }
+                    onOverlayClick = { showOverlayDialog = true },
+                    onBatteryClick = { showBatteryDialog = true }
                 )
                 Spacer(Modifier.height(16.dp))
             }
@@ -271,6 +282,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 when {
                     !accessibilityGranted -> showAccessibilityDialog = true
                     !overlayGranted -> showOverlayDialog = true
+                    !batteryOptGranted -> showBatteryDialog = true
                     else -> countdown = 3
                 }
             },
@@ -365,6 +377,36 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
             )
         }
+
+        if (showBatteryDialog) {
+            AlertDialog(
+                onDismissRequest = { showBatteryDialog = false },
+                containerColor = CardBlack,
+                title = { Text("Нужен доступ", color = TextPrimary) },
+                text = {
+                    Text(
+                        "Система может «замораживать» FocusLock в фоне и обрывать блокировку. Разрешите работу без ограничений по батарее. На Xiaomi/MIUI после этого диалога также зайдите в Настройки → Приложения → FocusLock → Автозапуск и включите его, а в разделе «Другие разрешения» включите «Показ всплывающих окон в фоновом режиме» — без этого MIUI всё равно может блокировать оверлей.",
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showBatteryDialog = false
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }) { Text("Открыть настройки", color = Cyan) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBatteryDialog = false }) {
+                        Text("Отмена", color = TextSecondary)
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -372,8 +414,10 @@ fun MainScreen(viewModel: MainViewModel) {
 fun PermissionsCard(
     accessibilityGranted: Boolean,
     overlayGranted: Boolean,
+    batteryOptGranted: Boolean,
     onAccessibilityClick: () -> Unit,
-    onOverlayClick: () -> Unit
+    onOverlayClick: () -> Unit,
+    onBatteryClick: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp)) {
         Text("Нужна настройка перед стартом", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -381,6 +425,8 @@ fun PermissionsCard(
         PermissionRow("Специальные возможности", accessibilityGranted, onAccessibilityClick)
         Spacer(Modifier.height(8.dp))
         PermissionRow("Поверх других приложений", overlayGranted, onOverlayClick)
+        Spacer(Modifier.height(8.dp))
+        PermissionRow("Без ограничений по батарее", batteryOptGranted, onBatteryClick)
     }
 }
 
@@ -487,6 +533,13 @@ fun ActiveBlockScreen(endTime: Long) {
             val m = (remaining % 3600) / 60
             val s = remaining % 60
             Text(
+                String.format("%02d:%02d:%02d", h, m, s),
+                color = Cyan,
+                fontSize = 42.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
                 "Заблокированные приложения недоступны до конца таймера",
                 color = TextSecondary,
                 fontSize = 13.sp,
@@ -496,4 +549,3 @@ fun ActiveBlockScreen(endTime: Long) {
         }
     }
 }
-   
