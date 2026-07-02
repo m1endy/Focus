@@ -24,6 +24,7 @@ object Keys {
     val END_TIME = longPreferencesKey("end_time")
     val IS_BLOCKING = booleanPreferencesKey("is_blocking")
     val DEBUG_LAST_EVENT = stringPreferencesKey("debug_last_event")
+    val CURRENTLY_ON_BLOCKED_APP = booleanPreferencesKey("currently_on_blocked_app")
 }
 
 class LockRepository(private val context: Context) {
@@ -42,6 +43,7 @@ class LockRepository(private val context: Context) {
         context.dataStore.edit {
             it[Keys.END_TIME] = System.currentTimeMillis() + durationMillis
             it[Keys.IS_BLOCKING] = true
+            it[Keys.CURRENTLY_ON_BLOCKED_APP] = false
         }
     }
 
@@ -70,6 +72,7 @@ class LockRepository(private val context: Context) {
                 context.dataStore.edit {
                     it[Keys.IS_BLOCKING] = false
                     it[Keys.END_TIME] = 0L
+                    it[Keys.CURRENTLY_ON_BLOCKED_APP] = false
                 }
             }
         }
@@ -81,6 +84,22 @@ class LockRepository(private val context: Context) {
                 .format(java.util.Date())
             kotlinx.coroutines.runBlocking {
                 context.dataStore.edit { it[Keys.DEBUG_LAST_EVENT] = "$message · $time" }
+            }
+        }
+
+        // Отражает, является ли ПРЯМО СЕЙЧАС открытое приложение заблокированным.
+        // В отличие от isBlocking (которое держится весь срок таймера), это
+        // значение меняется при каждом переключении между приложениями и решает,
+        // должен ли оверлей быть показан именно в этот момент.
+        fun setCurrentlyOnBlockedApp(context: Context, value: Boolean) {
+            kotlinx.coroutines.runBlocking {
+                context.dataStore.edit { it[Keys.CURRENTLY_ON_BLOCKED_APP] = value }
+            }
+        }
+
+        fun isCurrentlyOnBlockedApp(context: Context): Boolean {
+            return kotlinx.coroutines.runBlocking {
+                context.dataStore.data.first()[Keys.CURRENTLY_ON_BLOCKED_APP] ?: false
             }
         }
     }
