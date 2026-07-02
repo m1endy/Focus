@@ -5,27 +5,63 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import androidx.core.app.NotificationCompat
 import com.focuslock.app.data.LockRepository
 
 class BlockingService : AccessibilityService() {
 
+    private val handler = Handler(Looper.getMainLooper())
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            pollForegroundApp()
+            handler.postDelayed(this, POLL_INTERVAL_MS)
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         startForegroundNotification()
         LockRepository.writeDebugEvent(this, "Служба подключена")
+        handler.post(pollRunnable)
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(pollRunnable)
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
+        evaluate(pkg)
+    }
+
+    // Резервный опрос поверх событий: TYPE_WINDOW_STATE_CHANGED иногда не
+    // срабатывает при возврате в уже открытое приложение через список
+    // недавних — окно просто меняет фокус без "пересоздания", и система не
+    // шлёт событие. Из-за этого раньше оверлей не поднимался повторно, и
+    // заблокированным приложением можно было пользоваться. Поэтому параллельно
+    // с событиями периодически напрямую спрашиваем, какое окно сейчас в фокусе.
+    private fun pollForegroundApp() {
+        val (isBlocking, _, _) = LockRepository.readBlockingState(this)
+        if (!isBlocking) return
+        val activeWindow = try {
+            windows?.firstOrNull { it.isFocused }
+        } catch (e: Exception) {
+            null
+        } ?: return
+        val pkg = activeWindow.root?.packageName?.toString() ?: return
+        evaluate(pkg)
+    }
+
+    private fun evaluate(pkg: String) {
         if (pkg == packageName) return
 
         val (isBlocking, endTime, blockedPackages) = LockRepository.readBlockingState(this)
         if (!isBlocking) return
-
-        LockRepository.writeDebugEvent(this, "Вижу пакет: $pkg")
 
         if (System.currentTimeMillis() >= endTime) {
             LockRepository.clearBlockingState(this)
@@ -34,13 +70,15 @@ class BlockingService : AccessibilityService() {
         }
 
         val shouldBlock = pkg in blockedPackages || pkg == "com.android.settings"
+        val wasBlocked = LockRepository.isCurrentlyOnBlockedApp(this)
+        if (shouldBlock == wasBlocked) return // ничего не поменялось — не дёргаем службу зря
+
         LockRepository.setCurrentlyOnBlockedApp(this, shouldBlock)
 
         if (shouldBlock) {
             LockRepository.writeDebugEvent(this, "Блокирую: $pkg → запускаю оверлей")
             // Безопасно вызывать многократно: OverlayService сам не пересоздаёт
-            // окно, если оно уже показано (см. onStartCommand). Это исключает
-            // ситуацию, когда оверлей пропущен из-за ошибочной дедупликации.
+            // окно, если оно уже показано (см. onStartCommand).
             startForegroundService(Intent(this, OverlayService::class.java))
         } else {
             LockRepository.writeDebugEvent(this, "Не заблокировано: $pkg → снимаю оверлей")
@@ -72,9 +110,11 @@ class BlockingService : AccessibilityService() {
             .setOngoing(true)
             .setSilent(true)
             .build()
-        // AccessibilityService не является Service с foregroundServiceType напрямую в этом методе,
-        // уведомление публикуется через NotificationManager для видимости пользователю.
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, notification)
+    }
+
+    companion object {
+        private const val POLL_INTERVAL_MS = 600L
     }
 }
