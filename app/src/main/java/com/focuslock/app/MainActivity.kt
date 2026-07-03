@@ -23,6 +23,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -35,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -93,17 +95,93 @@ class MainActivity : ComponentActivity() {
             FocusLockTheme {
                 val isBlocking by viewModel.isBlocking.collectAsState()
                 val endTime by viewModel.endTime.collectAsState()
+                var currentTab by remember { mutableStateOf(AppTab.Home) }
+
                 Surface(modifier = Modifier.fillMaxSize(), color = DeepBlack) {
                     Crossfade(targetState = isBlocking, label = "nav") { blocking ->
                         if (blocking) {
                             ActiveBlockScreen(endTime = endTime, onExpired = { viewModel.stopBlocking() })
                         } else {
-                            MainScreen(viewModel = viewModel)
+                            // Вкладки доступны только вне активной блокировки — во время
+                            // фокус-сессии экран нарочно "одноцелевой", без навигации.
+                            Scaffold(
+                                containerColor = Color.Transparent,
+                                bottomBar = {
+                                    FocusLockBottomBar(
+                                        currentTab = currentTab,
+                                        onTabSelected = { currentTab = it }
+                                    )
+                                }
+                            ) { innerPadding ->
+                                Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                                    Crossfade(targetState = currentTab, label = "tab") { tab ->
+                                        when (tab) {
+                                            AppTab.Home -> MainScreen(viewModel = viewModel)
+                                            AppTab.Stats -> StatsScreen(viewModel = viewModel)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+enum class AppTab { Home, Stats }
+
+@Composable
+fun FocusLockBottomBar(currentTab: AppTab, onTabSelected: (AppTab) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .glassCard(20)
+            .padding(vertical = 8.dp, horizontal = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        BottomBarItem(
+            icon = Icons.Default.Lock,
+            label = "Блокировка",
+            selected = currentTab == AppTab.Home,
+            onClick = { onTabSelected(AppTab.Home) },
+            modifier = Modifier.weight(1f)
+        )
+        BottomBarItem(
+            icon = Icons.Default.BarChart,
+            label = "Статистика",
+            selected = currentTab == AppTab.Stats,
+            onClick = { onTabSelected(AppTab.Stats) },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun BottomBarItem(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { onClick() }
+            .padding(vertical = 8.dp)
+    ) {
+        Icon(icon, null, tint = if (selected) Cyan else TextSecondary, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(4.dp))
+        Text(
+            label,
+            color = if (selected) Cyan else TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+        )
     }
 }
 
@@ -121,6 +199,7 @@ fun MainScreen(viewModel: MainViewModel) {
     var showOverlayDialog by remember { mutableStateOf(false) }
     var showBatteryDialog by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
+    val listState = rememberLazyListState()
 
     var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
@@ -174,16 +253,22 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
             )
 
-            if (!accessibilityGranted || !overlayGranted || !batteryOptGranted) {
-                PermissionsCard(
-                    accessibilityGranted = accessibilityGranted,
-                    overlayGranted = overlayGranted,
-                    batteryOptGranted = batteryOptGranted,
-                    onAccessibilityClick = { showAccessibilityDialog = true },
-                    onOverlayClick = { showOverlayDialog = true },
-                    onBatteryClick = { showBatteryDialog = true }
-                )
-                Spacer(Modifier.height(16.dp))
+            AnimatedVisibility(
+                visible = !accessibilityGranted || !overlayGranted || !batteryOptGranted,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column {
+                    PermissionsCard(
+                        accessibilityGranted = accessibilityGranted,
+                        overlayGranted = overlayGranted,
+                        batteryOptGranted = batteryOptGranted,
+                        onAccessibilityClick = { showAccessibilityDialog = true },
+                        onOverlayClick = { showOverlayDialog = true },
+                        onBatteryClick = { showBatteryDialog = true }
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
             }
 
             // Время блокировки — свой ввод + быстрые пресеты
@@ -267,46 +352,65 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(filtered, key = { it.packageName }) { app ->
-                    AppRow(app, app.packageName in selected) { viewModel.toggleApp(app.packageName) }
+            // Список приложений + "ползунок" быстрой прокрутки рядом с ним (листать
+            // вручную десятки приложений неудобно — ползунком можно перейти сразу
+            // к нужной букве). Раньше кнопка "Начать блокировку" была отдельным
+            // элементом, наложенным поверх этой колонки через Box+align(BottomCenter),
+            // из-за чего при появлении карточки разрешений список мог визуально
+            // налезать на кнопку. Теперь кнопка — обычный последний элемент этой же
+            // Column, а список (с весом 1f) сам подстраивает высоту под неё, так что
+            // наложения быть не может ни при каком состоянии разрешений.
+            Row(modifier = Modifier.weight(1f)) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filtered, key = { it.packageName }) { app ->
+                        AppRow(app, app.packageName in selected) { viewModel.toggleApp(app.packageName) }
+                    }
+                    item { Spacer(Modifier.height(4.dp)) }
                 }
-                item { Spacer(Modifier.height(80.dp)) }
+                if (filtered.size > 14) {
+                    FastScrollbar(
+                        listState = listState,
+                        itemCount = filtered.size,
+                        modifier = Modifier.fillMaxHeight(),
+                        labelForIndex = { idx -> filtered.getOrNull(idx)?.label?.firstOrNull()?.uppercase() }
+                    )
+                }
             }
-        }
 
-        val pulse = rememberInfiniteTransition(label = "pulse")
-        val scale by pulse.animateFloat(
-            initialValue = 1f, targetValue = 1.04f,
-            animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "scale"
-        )
+            Spacer(Modifier.height(12.dp))
 
-        Button(
-            onClick = {
-                if (selected.isEmpty() || durationMinutes <= 0) return@Button
-                when {
-                    !accessibilityGranted -> showAccessibilityDialog = true
-                    !overlayGranted -> showOverlayDialog = true
-                    !batteryOptGranted -> showBatteryDialog = true
-                    else -> countdown = 3
-                }
-            },
-            enabled = selected.isNotEmpty() && durationMinutes > 0 && countdown == null,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(20.dp)
-                .fillMaxWidth()
-                .height(58.dp)
-                .graphicsLayerScale(scale),
-            shape = RoundedCornerShape(18.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Cyan, contentColor = Color.Black)
-        ) {
-            Icon(Icons.Default.Lock, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Начать блокировку", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            val pulse = rememberInfiniteTransition(label = "pulse")
+            val scale by pulse.animateFloat(
+                initialValue = 1f, targetValue = 1.04f,
+                animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "scale"
+            )
+
+            Button(
+                onClick = {
+                    if (selected.isEmpty() || durationMinutes <= 0) return@Button
+                    when {
+                        !accessibilityGranted -> showAccessibilityDialog = true
+                        !overlayGranted -> showOverlayDialog = true
+                        !batteryOptGranted -> showBatteryDialog = true
+                        else -> countdown = 3
+                    }
+                },
+                enabled = selected.isNotEmpty() && durationMinutes > 0 && countdown == null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(58.dp)
+                    .graphicsLayerScale(scale),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Cyan, contentColor = Color.Black)
+            ) {
+                Icon(Icons.Default.Lock, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Начать блокировку", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
         }
 
         countdown?.let { c ->
