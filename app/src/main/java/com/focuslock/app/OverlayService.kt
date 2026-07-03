@@ -245,7 +245,15 @@ fun OverlayContent(endTime: Long, onExpired: () -> Unit) {
         }
     }
 
-    val progress = (remaining.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
+    val targetProgress = (remaining.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
+    // remaining меняется раз в секунду, поэтому дуга раньше "прыгала".
+    // Анимируем переход между значениями линейно за то же время (1с) —
+    // визуально дуга крутится плавно, а не скачками.
+    val progress by animateFloatAsState(
+        targetValue = targetProgress,
+        animationSpec = tween(durationMillis = 1000, easing = LinearEasing),
+        label = "progress"
+    )
     val infinite = rememberInfiniteTransition(label = "glow")
     val glow by infinite.animateFloat(
         initialValue = 0.6f, targetValue = 1f,
