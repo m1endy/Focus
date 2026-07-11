@@ -171,31 +171,73 @@ private fun serializeSchedules(schedules: List<Schedule>): String {
 class ScheduleRepository(private val context: Context) {
     val schedules: Flow<List<Schedule>> = context.dataStore.data.map { parseSchedules(it[Keys.SCHEDULES] ?: "[]") }
 
-    suspend fun upsert(schedule: Schedule) {
+    // Возвращает false, если изменение отклонено, потому что ХРАНИМАЯ СЕЙЧАС
+    // версия расписания в этот момент находится в фазе блокировки — лазейка
+    // "снять уже начавшуюся блокировку через редактирование" закрыта именно
+    // здесь: проверяется не то, что пришло в параметре schedule (его можно
+    // сформировать как угодно), а то, что реально лежит в хранилище прямо
+    // сейчас, внутри одной atomic-транзакции DataStore. Создание НОВОГО
+    // расписания (которого ещё нет в списке) всегда разрешено.
+    suspend fun upsert(schedule: Schedule): Boolean {
+        var applied = false
         context.dataStore.edit { prefs ->
             val current = parseSchedules(prefs[Keys.SCHEDULES] ?: "[]").toMutableList()
             val index = current.indexOfFirst { it.id == schedule.id }
-            if (index >= 0) current[index] = schedule else current.add(schedule)
-            prefs[Keys.SCHEDULES] = serializeSchedules(current)
-        }
-    }
-
-    suspend fun delete(id: String) {
-        context.dataStore.edit { prefs ->
-            val current = parseSchedules(prefs[Keys.SCHEDULES] ?: "[]").filterNot { it.id == id }
-            prefs[Keys.SCHEDULES] = serializeSchedules(current)
-        }
-    }
-
-    suspend fun setEnabled(id: String, enabled: Boolean) {
-        context.dataStore.edit { prefs ->
-            val current = parseSchedules(prefs[Keys.SCHEDULES] ?: "[]").map { s ->
-                if (s.id == id) {
-                    s.copy(enabled = enabled, anchorTime = if (enabled) System.currentTimeMillis() else s.anchorTime)
-                } else s
+            val storedVersion = if (index >= 0) current[index] else null
+            if (storedVersion != null && Scheduler.isCurrentlyBlocking(storedVersion)) {
+                applied = false
+            } else {
+                if (index >= 0) current[index] = schedule else current.add(schedule)
+                prefs[Keys.SCHEDULES] = serializeSchedules(current)
+                applied = true
             }
-            prefs[Keys.SCHEDULES] = serializeSchedules(current)
         }
+        return applied
+    }
+
+    // Возвращает false, если удаление отклонено по той же причине. Если
+    // расписания с таким id уже нет — считаем это успехом (искомое
+    // постусловие "расписания больше нет в списке" и так выполнено).
+    suspend fun delete(id: String): Boolean {
+        var applied = true
+        context.dataStore.edit { prefs ->
+            val current = parseSchedules(prefs[Keys.SCHEDULES] ?: "[]")
+            val storedVersion = current.firstOrNull { it.id == id }
+            if (storedVersion != null && Scheduler.isCurrentlyBlocking(storedVersion)) {
+                applied = false
+            } else {
+                prefs[Keys.SCHEDULES] = serializeSchedules(current.filterNot { it.id == id })
+                applied = true
+            }
+        }
+        return applied
+    }
+
+    // Возвращает false, если попытка ВЫКЛЮЧИТЬ отклонена, потому что
+    // расписание сейчас в фазе блокировки. Включить обратно можно всегда:
+    // пока расписание выключено, evaluate() для него по определению уже
+    // возвращает null, так что эта проверка для enabled=true никогда не
+    // сработает — отдельно её обрабатывать не нужно.
+    suspend fun setEnabled(id: String, enabled: Boolean): Boolean {
+        var applied = false
+        context.dataStore.edit { prefs ->
+            val current = parseSchedules(prefs[Keys.SCHEDULES] ?: "[]")
+            val storedVersion = current.firstOrNull { it.id == id }
+            if (storedVersion == null) {
+                applied = false
+            } else if (!enabled && Scheduler.isCurrentlyBlocking(storedVersion)) {
+                applied = false
+            } else {
+                val updated = current.map { s ->
+                    if (s.id == id) {
+                        s.copy(enabled = enabled, anchorTime = if (enabled) System.currentTimeMillis() else s.anchorTime)
+                    } else s
+                }
+                prefs[Keys.SCHEDULES] = serializeSchedules(updated)
+                applied = true
+            }
+        }
+        return applied
     }
 
     companion object {
@@ -242,6 +284,13 @@ object Scheduler {
             ScheduleType.CYCLIC -> evaluateCyclic(schedule, now)
         }
     }
+
+    /** Сейчас ли расписание в фазе блокировки — единственный источник истины
+     *  для защиты от лазейки "отключить/изменить/удалить уже начавшуюся
+     *  блокировку" (см. ScheduleRepository). Тонкая обёртка над evaluate —
+     *  не дублирует логику определения активности, а переиспользует её. */
+    fun isCurrentlyBlocking(schedule: Schedule, now: Long = System.currentTimeMillis()): Boolean =
+        evaluate(schedule, now) != null
 
     /** Сейчас идёт фаза "отдыха" у циклического расписания (для статуса в списке). */
     fun isInRestPhase(schedule: Schedule, now: Long): Boolean {
