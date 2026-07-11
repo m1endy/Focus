@@ -88,8 +88,8 @@ class OverlayService : Service() {
 
     private fun showOverlay() {
         LockRepository.writeDebugEvent(this, "showOverlay() запущен")
-        val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
-        if (!isBlocking) {
+        val effective = LockRepository.readEffectiveBlockState(this)
+        if (!effective.active) {
             LockRepository.writeDebugEvent(this, "showOverlay: блокировка уже не активна")
             stopSelf()
             return
@@ -143,7 +143,7 @@ class OverlayService : Service() {
         // Оборачиваем в FrameLayout и перехватываем Back уже на нём.
         val composeView = ComposeView(this).apply {
             setContent {
-                OverlayContent(endTime = endTime, onExpired = {
+                OverlayContent(endTime = effective.segmentEnd, onExpired = {
                     LockRepository.clearBlockingState(this@OverlayService)
                     stopSelf()
                 })
@@ -189,9 +189,9 @@ class OverlayService : Service() {
         // Раньше здесь проверялся только общий таймер сессии (isBlocking),
         // из-за чего оверлей поднимался заново даже после ухода на Home —
         // и блокировка не отпускала пользователя до конца всего таймера.
-        val (isBlocking, endTime, _) = LockRepository.readBlockingState(this)
+        val effective = LockRepository.readEffectiveBlockState(this)
         val stillOnBlockedApp = LockRepository.isCurrentlyOnBlockedApp(this)
-        if (isBlocking && System.currentTimeMillis() < endTime && stillOnBlockedApp) {
+        if (effective.active && stillOnBlockedApp) {
             val restart = Intent(this, OverlayService::class.java)
             startForegroundService(restart)
         }
