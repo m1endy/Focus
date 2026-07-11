@@ -31,6 +31,7 @@ import com.focuslock.app.data.*
 import com.focuslock.app.ui.*
 import java.util.Calendar
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 // ===== Локальная навигация внутри вкладки (список ↔ создание/редактирование) =====
 // Это не полноценный back stack, а простое локальное состояние — вкладка
@@ -59,25 +60,26 @@ fun SchedulesScreen(viewModel: MainViewModel) {
                 apps = apps,
                 onAdd = { nav = SchedulesNav.Create },
                 onEdit = { schedule -> nav = SchedulesNav.Edit(schedule) },
-                onToggle = { id, enabled -> viewModel.setScheduleEnabled(id, enabled) },
-                onDelete = { id -> viewModel.deleteSchedule(id) }
+                onToggle = viewModel::trySetScheduleEnabled,
+                onDelete = viewModel::tryDeleteSchedule
             )
             is SchedulesNav.Create -> ScheduleEditScreen(
                 existing = null,
                 allApps = apps,
-                onSave = { schedule -> viewModel.saveSchedule(schedule); nav = SchedulesNav.List },
+                onSave = viewModel::trySaveSchedule,
+                onSaved = { nav = SchedulesNav.List },
                 onCancel = { nav = SchedulesNav.List },
-                onDelete = null
+                onDelete = null,
+                onDeleted = {}
             )
             is SchedulesNav.Edit -> ScheduleEditScreen(
                 existing = current.schedule,
                 allApps = apps,
-                onSave = { schedule -> viewModel.saveSchedule(schedule); nav = SchedulesNav.List },
+                onSave = viewModel::trySaveSchedule,
+                onSaved = { nav = SchedulesNav.List },
                 onCancel = { nav = SchedulesNav.List },
-                onDelete = {
-                    viewModel.deleteSchedule(current.schedule.id)
-                    nav = SchedulesNav.List
-                }
+                onDelete = viewModel::tryDeleteSchedule,
+                onDeleted = { nav = SchedulesNav.List }
             )
         }
     }
@@ -91,8 +93,8 @@ private fun SchedulesListScreen(
     apps: kotlin.collections.List<AppInfo>,
     onAdd: () -> Unit,
     onEdit: (Schedule) -> Unit,
-    onToggle: (String, Boolean) -> Unit,
-    onDelete: (String) -> Unit
+    onToggle: suspend (String, Boolean) -> Boolean,
+    onDelete: suspend (String) -> Boolean
 ) {
     val appsByPackage = remember(apps) { apps.associateBy { it.packageName } }
 
@@ -183,18 +185,30 @@ private fun ScheduleCard(
     appsByPackage: Map<String, AppInfo>,
     now: Long,
     onEdit: () -> Unit,
-    onToggle: (Boolean) -> Unit,
-    onDelete: () -> Unit
+    onToggle: suspend (Boolean) -> Boolean,
+    onDelete: suspend () -> Boolean
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showLockedMessage by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val displayName = schedule.name.ifBlank { defaultScheduleName(schedule.type) }
+
+    // Единственный источник истины об активности — тот же Scheduler, что
+    // решает, показывать ли экран блокировки. Пока расписание в этой фазе,
+    // редактирование/выключение/удаление запрещены — иначе через них можно
+    // было бы снять уже начавшуюся блокировку.
+    val isLocked = Scheduler.isCurrentlyBlocking(schedule, now)
 
     Column(modifier = Modifier.fillMaxWidth().glassCard(18).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             GlassIconBadge(
-                icon = if (schedule.type == ScheduleType.TIME_BASED) Icons.Default.DateRange else Icons.Default.Refresh,
+                icon = when {
+                    isLocked -> Icons.Default.Lock
+                    schedule.type == ScheduleType.TIME_BASED -> Icons.Default.DateRange
+                    else -> Icons.Default.Refresh
+                },
                 sizeDp = 38,
-                accent = if (schedule.enabled) Cyan else TextSecondary
+                accent = if (isLocked) DangerRed else if (schedule.enabled) Cyan else TextSecondary
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -203,7 +217,13 @@ private fun ScheduleCard(
             }
             Switch(
                 checked = schedule.enabled,
-                onCheckedChange = onToggle,
+                enabled = !isLocked,
+                onCheckedChange = { newValue ->
+                    scope.launch {
+                        val applied = onToggle(newValue)
+                        if (!applied) showLockedMessage = true
+                    }
+                },
                 colors = SwitchDefaults.colors(checkedTrackColor = Cyan, checkedThumbColor = Color.White)
             )
         }
@@ -215,7 +235,7 @@ private fun ScheduleCard(
             Spacer(Modifier.weight(1f))
             Text(
                 scheduleStatusText(schedule, now),
-                color = if (schedule.enabled) Cyan else TextSecondary,
+                color = if (isLocked) DangerRed else if (schedule.enabled) Cyan else TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )
@@ -224,12 +244,12 @@ private fun ScheduleCard(
         Spacer(Modifier.height(12.dp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            TextButton(onClick = onEdit) {
+            TextButton(onClick = { if (isLocked) showLockedMessage = true else onEdit() }) {
                 Icon(Icons.Default.Edit, null, tint = TextSecondary, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Изменить", color = TextSecondary, fontSize = 13.sp)
             }
-            TextButton(onClick = { showDeleteConfirm = true }) {
+            TextButton(onClick = { if (isLocked) showLockedMessage = true else showDeleteConfirm = true }) {
                 Icon(Icons.Default.Delete, null, tint = DangerRed, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Удалить", color = DangerRed, fontSize = 13.sp)
@@ -244,7 +264,13 @@ private fun ScheduleCard(
             title = { Text("Удалить расписание?", color = TextPrimary) },
             text = { Text("«$displayName» будет удалено без возможности восстановления.", color = TextSecondary) },
             confirmButton = {
-                TextButton(onClick = { showDeleteConfirm = false; onDelete() }) {
+                TextButton(onClick = {
+                    showDeleteConfirm = false
+                    scope.launch {
+                        val applied = onDelete()
+                        if (!applied) showLockedMessage = true
+                    }
+                }) {
                     Text("Удалить", color = DangerRed)
                 }
             },
@@ -253,6 +279,29 @@ private fun ScheduleCard(
             }
         )
     }
+
+    if (showLockedMessage) {
+        LockedScheduleDialog(onDismiss = { showLockedMessage = false })
+    }
+}
+
+@Composable
+private fun LockedScheduleDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CardBlack,
+        title = { Text("Расписание сейчас активно", color = TextPrimary) },
+        text = {
+            Text(
+                "Нельзя изменить, отключить или удалить расписание, пока оно активно. " +
+                    "Это можно будет сделать, как только текущая блокировка закончится (или во время перерыва в Pomodoro).",
+                color = TextSecondary
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Понятно", color = Cyan) }
+        }
+    )
 }
 
 @Composable
@@ -288,9 +337,11 @@ private fun AppIconsRow(packages: Set<String>, appsByPackage: Map<String, AppInf
 private fun ScheduleEditScreen(
     existing: Schedule?,
     allApps: kotlin.collections.List<AppInfo>,
-    onSave: (Schedule) -> Unit,
+    onSave: suspend (Schedule) -> Boolean,
+    onSaved: () -> Unit,
     onCancel: () -> Unit,
-    onDelete: (() -> Unit)?
+    onDelete: (suspend (String) -> Boolean)?,
+    onDeleted: () -> Unit
 ) {
     val base = remember { existing ?: Schedule.blank() }
     var name by remember { mutableStateOf(base.name) }
@@ -306,6 +357,9 @@ private fun ScheduleEditScreen(
     var rangeStartMinute by remember { mutableStateOf(base.rangeStartMinute) }
     var rangeEndMinute by remember { mutableStateOf(base.rangeEndMinute) }
     var search by remember { mutableStateOf("") }
+    var showLockedMessage by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     val filteredApps = remember(allApps, search) {
         if (search.isBlank()) allApps else allApps.filter { it.label.contains(search, ignoreCase = true) }
@@ -511,7 +565,15 @@ private fun ScheduleEditScreen(
                             rangeEndMinute = rangeEndMinute,
                             anchorTime = System.currentTimeMillis()
                         )
-                        onSave(toSave)
+                        // onSave может отклонить сохранение, если расписание уже
+                        // существовало и успело перейти в фазу блокировки, пока
+                        // пользователь заполнял форму (например, наступило время
+                        // начала) — ScheduleRepository.upsert проверяет это заново
+                        // прямо перед записью, а не полагается на состояние экрана.
+                        scope.launch {
+                            val applied = onSave(toSave)
+                            if (applied) onSaved() else showLockedMessage = true
+                        }
                     },
                     enabled = isValid,
                     modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -522,12 +584,45 @@ private fun ScheduleEditScreen(
                 }
                 if (onDelete != null) {
                     Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = { showDeleteConfirm = true }, modifier = Modifier.fillMaxWidth()) {
                         Text("Удалить расписание", color = DangerRed)
                     }
                 }
             }
         }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            containerColor = CardBlack,
+            title = { Text("Удалить расписание?", color = TextPrimary) },
+            text = {
+                Text(
+                    "«${name.ifBlank { defaultScheduleName(type) }}» будет удалено без возможности восстановления.",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteConfirm = false
+                    scope.launch {
+                        val applied = onDelete?.invoke(base.id) ?: false
+                        if (applied) onDeleted() else showLockedMessage = true
+                    }
+                }) { Text("Удалить", color = DangerRed) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Отмена", color = TextSecondary) }
+            }
+        )
+    }
+
+    if (showLockedMessage) {
+        // Пока пользователь редактировал, расписание перешло в фазу блокировки:
+        // сохранить/удалить уже нельзя — закрываем сообщение и возвращаемся к
+        // списку, продолжать редактирование несохраняемой формы не имеет смысла.
+        LockedScheduleDialog(onDismiss = { showLockedMessage = false; onCancel() })
     }
 }
 
