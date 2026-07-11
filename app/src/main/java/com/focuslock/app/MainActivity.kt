@@ -117,6 +117,7 @@ class MainActivity : ComponentActivity() {
                                     Crossfade(targetState = currentTab, label = "tab") { tab ->
                                         when (tab) {
                                             AppTab.Home -> MainScreen(viewModel = viewModel)
+                                            AppTab.Schedules -> SchedulesScreen(viewModel = viewModel)
                                             AppTab.Stats -> StatsScreen(viewModel = viewModel)
                                         }
                                     }
@@ -130,7 +131,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class AppTab { Home, Stats }
+enum class AppTab { Home, Schedules, Stats }
 
 @Composable
 fun FocusLockBottomBar(currentTab: AppTab, onTabSelected: (AppTab) -> Unit) {
@@ -147,6 +148,13 @@ fun FocusLockBottomBar(currentTab: AppTab, onTabSelected: (AppTab) -> Unit) {
             label = "Блокировка",
             selected = currentTab == AppTab.Home,
             onClick = { onTabSelected(AppTab.Home) },
+            modifier = Modifier.weight(1f)
+        )
+        BottomBarItem(
+            icon = Icons.Default.DateRange,
+            label = "Расписания",
+            selected = currentTab == AppTab.Schedules,
+            onClick = { onTabSelected(AppTab.Schedules) },
             modifier = Modifier.weight(1f)
         )
         BottomBarItem(
