@@ -27,6 +27,7 @@ object Keys {
     val DEBUG_LAST_EVENT = stringPreferencesKey("debug_last_event")
     val CURRENTLY_ON_BLOCKED_APP = booleanPreferencesKey("currently_on_blocked_app")
     val SESSION_HISTORY = stringPreferencesKey("session_history")
+    val SCHEDULES = stringPreferencesKey("schedules")
 }
 
 // ===== История сессий блокировки (для вкладки "Статистика") =====
@@ -129,6 +130,48 @@ class LockRepository(private val context: Context) {
             kotlinx.coroutines.runBlocking { finalizeSession(context) }
         }
 
+        // ===== Единый механизм принятия решения "блокировать ли сейчас" =====
+        // Объединяет быструю блокировку и все включённые расписания. Правило
+        // конфликтов: если блокировки требует хотя бы один активный источник —
+        // блокируем; список пакетов — объединение пакетов всех активных сейчас
+        // источников. segmentEnd — ближайший момент, когда СЕЙЧАС активный сегмент
+        // закончится (используется только для обратного отсчёта на оверлее; если
+        // после этого блокировка должна продолжиться по другой причине, следующий
+        // тик опроса это обнаружит и поднимет оверлей заново — см. BlockingService).
+        //
+        // Вызывается на каждом тике уже существующего 600мс опроса
+        // BlockingService, поэтому попутно (дёшево) выполняет два вида
+        // обслуживания, которым иначе понадобился бы отдельный таймер:
+        //  - закрывает истёкшую по времени сессию быстрой блокировки;
+        //  - выключает циклические расписания с исчерпанным числом циклов.
+        fun readEffectiveBlockState(context: Context): EffectiveBlockState {
+            val now = System.currentTimeMillis()
+
+            var (quickBlocking, quickEnd, quickPackages) = readBlockingState(context)
+            if (quickBlocking && now >= quickEnd) {
+                clearBlockingState(context)
+                quickBlocking = false
+                quickEnd = 0L
+                quickPackages = emptySet()
+            }
+            ScheduleRepository.disableCompletedCountSchedules(context, now)
+
+            val packages = mutableSetOf<String>()
+            val ends = mutableListOf<Long>()
+            if (quickBlocking && now < quickEnd) {
+                packages += quickPackages
+                ends += quickEnd
+            }
+            for (schedule in ScheduleRepository.readSchedulesSync(context)) {
+                val segmentEnd = Scheduler.evaluate(schedule, now) ?: continue
+                packages += schedule.packages
+                ends += segmentEnd
+            }
+
+            return if (packages.isEmpty()) EffectiveBlockState(false, emptySet(), 0L)
+            else EffectiveBlockState(true, packages, ends.min())
+        }
+
         // Единая точка завершения сессии блокировки — используется и из
         // suspend-контекста (ViewModel.stopBlock), и синхронно из служб/ресивера
         // (OverlayService, BlockingService, BootReceiver), у которых нет
@@ -219,7 +262,9 @@ data class StatsResult(val totalMinutes: Long, val perApp: List<AppStat>)
 
 private const val DAY_MS = 24L * 60 * 60 * 1000
 
-private fun startOfDay(now: Long): Long {
+// Используется и статистикой (ниже), и Scheduler'ом (Schedules.kt, тот же
+// пакет) — единая точка расчёта "начала суток" по локальному времени устройства.
+fun startOfDay(now: Long): Long {
     val cal = java.util.Calendar.getInstance()
     cal.timeInMillis = now
     cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
@@ -263,6 +308,7 @@ fun computeStats(sessions: List<BlockSession>, period: StatsPeriod, now: Long = 
 
 class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private val repo = LockRepository(app)
+    private val scheduleRepo = ScheduleRepository(app)
 
     private val _installedApps = MutableStateFlow<List<AppInfo>>(emptyList())
     val installedApps: StateFlow<List<AppInfo>> = _installedApps.asStateFlow()
@@ -281,6 +327,8 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
     )
     val sessionHistory: StateFlow<List<BlockSession>> = repo.sessionHistory
         .map { parseSessionHistory(it) }
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
+    val schedules: StateFlow<List<Schedule>> = scheduleRepo.schedules
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
 
     init {
@@ -308,5 +356,17 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
     // сам снять блокировку по истечении времени, а не зависать на 00:00.
     fun stopBlocking() {
         viewModelScope.launch { repo.stopBlock() }
+    }
+
+    fun saveSchedule(schedule: Schedule) {
+        viewModelScope.launch { scheduleRepo.upsert(schedule) }
+    }
+
+    fun deleteSchedule(id: String) {
+        viewModelScope.launch { scheduleRepo.delete(id) }
+    }
+
+    fun setScheduleEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch { scheduleRepo.setEnabled(id, enabled) }
     }
 }
