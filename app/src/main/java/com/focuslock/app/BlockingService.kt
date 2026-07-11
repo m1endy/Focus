@@ -46,8 +46,8 @@ class BlockingService : AccessibilityService() {
     // заблокированным приложением можно было пользоваться. Поэтому параллельно
     // с событиями периодически напрямую спрашиваем, какое окно сейчас в фокусе.
     private fun pollForegroundApp() {
-        val (isBlocking, _, _) = LockRepository.readBlockingState(this)
-        if (!isBlocking) return
+        val effective = LockRepository.readEffectiveBlockState(this)
+        if (!effective.active) return
         val activeWindow = try {
             windows?.firstOrNull { it.isFocused }
         } catch (e: Exception) {
@@ -60,16 +60,26 @@ class BlockingService : AccessibilityService() {
     private fun evaluate(pkg: String) {
         if (pkg == packageName) return
 
-        val (isBlocking, endTime, blockedPackages) = LockRepository.readBlockingState(this)
-        if (!isBlocking) return
-
-        if (System.currentTimeMillis() >= endTime) {
-            LockRepository.clearBlockingState(this)
-            stopService(Intent(this, OverlayService::class.java))
+        // readEffectiveBlockState объединяет быструю блокировку и все включённые
+        // расписания (см. data/Schedules.kt) и попутно закрывает истёкшую сессию
+        // быстрой блокировки/исчерпанные циклические расписания — отдельно это
+        // здесь делать не нужно.
+        val effective = LockRepository.readEffectiveBlockState(this)
+        if (!effective.active) {
+            // Раньше при !isBlocking функция просто выходила: это было безопасно,
+            // потому что единственный путь к isBlocking=false уже сам снимал
+            // оверлей. Для расписаний такого "события" нет — фаза блокировки
+            // заканчивается сама по себе, когда истекает время, поэтому здесь
+            // нужно самим проверить и снять оверлей, если он всё ещё висит.
+            if (LockRepository.isCurrentlyOnBlockedApp(this)) {
+                LockRepository.setCurrentlyOnBlockedApp(this, false)
+                LockRepository.writeDebugEvent(this, "Блокировок нет → снимаю оверлей")
+                stopService(Intent(this, OverlayService::class.java))
+            }
             return
         }
 
-        val shouldBlock = pkg in blockedPackages || pkg == "com.android.settings"
+        val shouldBlock = pkg in effective.blockedPackages || pkg == "com.android.settings"
         val wasBlocked = LockRepository.isCurrentlyOnBlockedApp(this)
         if (shouldBlock == wasBlocked) return // ничего не поменялось — не дёргаем службу зря
 
