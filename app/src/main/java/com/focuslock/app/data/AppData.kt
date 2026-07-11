@@ -358,15 +358,12 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch { repo.stopBlock() }
     }
 
-    fun saveSchedule(schedule: Schedule) {
-        viewModelScope.launch { scheduleRepo.upsert(schedule) }
-    }
+    // suspend + Boolean (а не fire-and-forget, как раньше): экран должен
+    // узнать, была ли операция отклонена репозиторием, потому что расписание
+    // прямо сейчас в фазе блокировки (см. ScheduleRepository/Scheduler).
+    suspend fun trySaveSchedule(schedule: Schedule): Boolean = scheduleRepo.upsert(schedule)
 
-    fun deleteSchedule(id: String) {
-        viewModelScope.launch { scheduleRepo.delete(id) }
-    }
+    suspend fun tryDeleteSchedule(id: String): Boolean = scheduleRepo.delete(id)
 
-    fun setScheduleEnabled(id: String, enabled: Boolean) {
-        viewModelScope.launch { scheduleRepo.setEnabled(id, enabled) }
-    }
+    suspend fun trySetScheduleEnabled(id: String, enabled: Boolean): Boolean = scheduleRepo.setEnabled(id, enabled)
 }
