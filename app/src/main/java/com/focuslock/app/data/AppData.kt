@@ -28,6 +28,7 @@ object Keys {
     val CURRENTLY_ON_BLOCKED_APP = booleanPreferencesKey("currently_on_blocked_app")
     val SESSION_HISTORY = stringPreferencesKey("session_history")
     val SCHEDULES = stringPreferencesKey("schedules")
+    val SCHEDULE_SEGMENT_STARTS = stringPreferencesKey("schedule_segment_starts")
 }
 
 // ===== История сессий блокировки (для вкладки "Статистика") =====
@@ -84,6 +85,28 @@ private fun appendSession(historyJson: String, start: Long, end: Long, packages:
         }
     }
     return trimmed.toString()
+}
+
+// Карта scheduleId -> момент начала ТЕКУЩЕГО активного сегмента расписания.
+// Нужна, чтобы при переходе "активно -> неактивно" знать, с какого момента
+// считать сегмент, и записать его в SESSION_HISTORY — той же историей, что и
+// у быстрой блокировки, поэтому статистика не отличает источники (см.
+// reconcileScheduleSessions ниже).
+private fun parseSegmentStarts(json: String): Map<String, Long> {
+    return try {
+        val obj = org.json.JSONObject(json)
+        val result = mutableMapOf<String, Long>()
+        obj.keys().forEach { key -> result[key] = obj.optLong(key, 0L) }
+        result
+    } catch (e: Exception) {
+        emptyMap()
+    }
+}
+
+private fun serializeSegmentStarts(starts: Map<String, Long>): String {
+    val obj = org.json.JSONObject()
+    starts.forEach { (id, start) -> obj.put(id, start) }
+    return obj.toString()
 }
 
 class LockRepository(private val context: Context) {
@@ -154,22 +177,83 @@ class LockRepository(private val context: Context) {
                 quickEnd = 0L
                 quickPackages = emptySet()
             }
+            val quickStart = if (quickBlocking) {
+                kotlinx.coroutines.runBlocking { context.dataStore.data.first()[Keys.START_TIME] ?: 0L }
+            } else 0L
+
             ScheduleRepository.disableCompletedCountSchedules(context, now)
+            val schedules = ScheduleRepository.readSchedulesSync(context)
+            // Помимо возврата активных сейчас сегментов расписаний, эта функция
+            // попутно (в той же atomic-транзакции) закрывает и логирует в
+            // SESSION_HISTORY сегменты, которые только что перестали быть
+            // активными — именно за счёт этого статистика начинает видеть
+            // время, заблокированное расписаниями, а не только вручную.
+            val scheduleSegments = reconcileScheduleSessions(context, schedules, now)
 
-            val packages = mutableSetOf<String>()
-            val ends = mutableListOf<Long>()
-            if (quickBlocking && now < quickEnd) {
-                packages += quickPackages
-                ends += quickEnd
+            val segments = mutableListOf<Triple<Long, Long, Set<String>>>()
+            if (quickBlocking && now < quickEnd && quickStart > 0L) {
+                segments += Triple(quickStart, quickEnd, quickPackages)
             }
-            for (schedule in ScheduleRepository.readSchedulesSync(context)) {
-                val segmentEnd = Scheduler.evaluate(schedule, now) ?: continue
-                packages += schedule.packages
-                ends += segmentEnd
-            }
+            segments += scheduleSegments
 
-            return if (packages.isEmpty()) EffectiveBlockState(false, emptySet(), 0L)
-            else EffectiveBlockState(true, packages, ends.min())
+            if (segments.isEmpty()) return EffectiveBlockState(false, emptySet(), 0L, 0L)
+
+            val allPackages = segments.flatMap { it.third }.toSet()
+            // Тот же принцип, что и раньше (ends.min()): для обратного отсчёта
+            // берём сегмент с ближайшим окончанием — start и end берём из ОДНОГО
+            // и того же сегмента, чтобы не смешивать границы разных источников.
+            val primary = segments.minByOrNull { it.second }!!
+            return EffectiveBlockState(true, allPackages, primary.first, primary.second)
+        }
+
+        // Для каждого расписания сравнивает его текущую активность с тем, что
+        // было запомнено на предыдущей проверке (SCHEDULE_SEGMENT_STARTS):
+        //  - только что стало активным -> запоминаем момент начала;
+        //  - было активно и уже активно -> ничего не меняем, сегмент продолжается;
+        //  - было активно, а сейчас нет -> сегмент завершился, записываем его в
+        //    SESSION_HISTORY (appendSession) — тем же способом, что и быстрая
+        //    блокировка, поэтому computeStats() уже умеет их учитывать без
+        //    отдельной логики.
+        // Погрешность момента начала/конца — до одного тика опроса (~600мс),
+        // что не заметно на уровне минутной статистики.
+        private fun reconcileScheduleSessions(
+            context: Context,
+            schedules: List<Schedule>,
+            now: Long
+        ): List<Triple<Long, Long, Set<String>>> {
+            var activeSegments = emptyList<Triple<Long, Long, Set<String>>>()
+            kotlinx.coroutines.runBlocking {
+                context.dataStore.edit { prefs ->
+                    val starts = parseSegmentStarts(prefs[Keys.SCHEDULE_SEGMENT_STARTS] ?: "{}").toMutableMap()
+                    var history = prefs[Keys.SESSION_HISTORY] ?: "[]"
+                    var historyChanged = false
+                    val active = mutableListOf<Triple<Long, Long, Set<String>>>()
+
+                    for (schedule in schedules) {
+                        val segmentEnd = Scheduler.evaluate(schedule, now)
+                        if (segmentEnd != null) {
+                            val start = starts.getOrPut(schedule.id) { now }
+                            active += Triple(start, segmentEnd, schedule.packages)
+                        } else {
+                            val start = starts.remove(schedule.id)
+                            if (start != null && now > start && schedule.packages.isNotEmpty()) {
+                                history = appendSession(history, start, now, schedule.packages)
+                                historyChanged = true
+                            }
+                        }
+                    }
+                    // На случай расписаний, удалённых в промежутке между проверками
+                    // (сама по себе такая ситуация не должна возникать, пока
+                    // расписание активно — см. защиту в ScheduleRepository), не даём
+                    // карте расти записями без соответствующего расписания.
+                    starts.keys.retainAll(schedules.map { it.id }.toSet())
+
+                    activeSegments = active
+                    if (historyChanged) prefs[Keys.SESSION_HISTORY] = history
+                    prefs[Keys.SCHEDULE_SEGMENT_STARTS] = serializeSegmentStarts(starts)
+                }
+            }
+            return activeSegments
         }
 
         // Единая точка завершения сессии блокировки — используется и из
@@ -283,27 +367,60 @@ private fun periodStartFor(period: StatsPeriod, now: Long): Long = when (period)
 
 private fun msToMinutes(ms: Long): Long = Math.round(ms / 60000.0)
 
-// Считаем не по "чьей сессии сколько было", а по фактическому пересечению
-// каждой сессии с окном периода — так сессия, начавшаяся вчера вечером и
-// закончившаяся сегодня ночью, корректно распределяется между "сегодня" и
-// более широкими периодами, а не засчитывается целиком в одну корзину.
+// Считаем не по "чьей сессии сколько было", а по фактическому объединению
+// интервалов внутри окна периода. Раньше сессии просто суммировались — это
+// было корректно, пока источник блокировки был только один (быстрая
+// блокировка не может идти сама с собой одновременно). Теперь, когда
+// расписания тоже пишут сессии в ту же историю, два источника (например,
+// расписание и быстрая блокировка, или два расписания) могут пересекаться по
+// времени — наивная сумма засчитала бы пересечение дважды. Поэтому сначала
+// обрезаем каждую сессию по границам периода, а затем сливаем пересекающиеся
+// интервалы — отдельно для общего итога и отдельно для каждого приложения.
 fun computeStats(sessions: List<BlockSession>, period: StatsPeriod, now: Long = System.currentTimeMillis()): StatsResult {
     val periodStart = periodStartFor(period, now)
-    val totals = LinkedHashMap<String, Long>()
-    var totalMs = 0L
-    for (session in sessions) {
-        val overlapMs = (minOf(session.end, now) - maxOf(session.start, periodStart)).coerceAtLeast(0L)
-        if (overlapMs <= 0L) continue
-        totalMs += overlapMs
-        for (pkg in session.packages) {
-            totals[pkg] = (totals[pkg] ?: 0L) + overlapMs
+
+    val clipped = sessions.mapNotNull { s ->
+        val start = maxOf(s.start, periodStart)
+        val end = minOf(s.end, now)
+        if (end > start) Triple(start, end, s.packages) else null
+    }
+
+    val totalMs = mergedDurationMs(clipped.map { it.first to it.second })
+
+    val perPackageIntervals = mutableMapOf<String, MutableList<Pair<Long, Long>>>()
+    for ((start, end, packages) in clipped) {
+        for (pkg in packages) {
+            perPackageIntervals.getOrPut(pkg) { mutableListOf() }.add(start to end)
         }
     }
-    val perApp = totals.entries
-        .map { AppStat(it.key, msToMinutes(it.value)) }
+    val perApp = perPackageIntervals.entries
+        .map { (pkg, intervals) -> AppStat(pkg, msToMinutes(mergedDurationMs(intervals))) }
         .filter { it.minutes > 0L }
         .sortedByDescending { it.minutes }
+
     return StatsResult(msToMinutes(totalMs), perApp)
+}
+
+// Сливает пересекающиеся/смежные интервалы и возвращает суммарную
+// длительность объединения (без двойного учёта наложений).
+private fun mergedDurationMs(intervals: List<Pair<Long, Long>>): Long {
+    if (intervals.isEmpty()) return 0L
+    val sorted = intervals.sortedBy { it.first }
+    var total = 0L
+    var curStart = sorted[0].first
+    var curEnd = sorted[0].second
+    for (i in 1 until sorted.size) {
+        val (s, e) = sorted[i]
+        if (s <= curEnd) {
+            if (e > curEnd) curEnd = e
+        } else {
+            total += curEnd - curStart
+            curStart = s
+            curEnd = e
+        }
+    }
+    total += curEnd - curStart
+    return total
 }
 
 class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
