@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalFoundationApi::class)
+
 package com.focuslock.app
 
 import android.app.Application
@@ -16,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,6 +27,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -33,11 +38,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +60,8 @@ import com.focuslock.app.data.AppInfo
 import com.focuslock.app.data.MainViewModel
 import com.focuslock.app.ui.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 class FocusLockApp : Application() {
     override fun onCreate() {
@@ -95,7 +105,20 @@ class MainActivity : ComponentActivity() {
             FocusLockTheme {
                 val isBlocking by viewModel.isBlocking.collectAsState()
                 val endTime by viewModel.endTime.collectAsState()
-                var currentTab by remember { mutableStateOf(AppTab.Home) }
+                val pagerState = rememberPagerState(pageCount = { AppTab.values().size })
+                val scope = rememberCoroutineScope()
+                val haptics = LocalHapticFeedback.current
+
+                // Лёгкий тактильный отклик при смене вкладки — срабатывает и от
+                // нажатия на нижнюю панель, и от свайпа, потому что оба способа
+                // в итоге меняют pagerState.settledPage.
+                var previousSettledPage by remember { mutableStateOf(pagerState.settledPage) }
+                LaunchedEffect(pagerState.settledPage) {
+                    if (pagerState.settledPage != previousSettledPage) {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        previousSettledPage = pagerState.settledPage
+                    }
+                }
 
                 Surface(modifier = Modifier.fillMaxSize(), color = DeepBlack) {
                     Crossfade(targetState = isBlocking, label = "nav") { blocking ->
@@ -108,18 +131,25 @@ class MainActivity : ComponentActivity() {
                                 containerColor = Color.Transparent,
                                 bottomBar = {
                                     FocusLockBottomBar(
-                                        currentTab = currentTab,
-                                        onTabSelected = { currentTab = it }
+                                        currentTab = AppTab.values()[pagerState.currentPage],
+                                        onTabSelected = { tab ->
+                                            scope.launch { pagerState.animateScrollToPage(tab.ordinal) }
+                                        }
                                     )
                                 }
                             ) { innerPadding ->
-                                Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-                                    Crossfade(targetState = currentTab, label = "tab") { tab ->
-                                        when (tab) {
-                                            AppTab.Home -> MainScreen(viewModel = viewModel)
-                                            AppTab.Schedules -> SchedulesScreen(viewModel = viewModel)
-                                            AppTab.Stats -> StatsScreen(viewModel = viewModel)
-                                        }
+                                // Свайп между вкладками (Блокировка ←→ Расписания ←→
+                                // Статистика), как в Telegram. Нижняя навигация выше не
+                                // ломается — она просто просит pager анимированно
+                                // перейти на нужную страницу.
+                                HorizontalPager(
+                                    state = pagerState,
+                                    modifier = Modifier.fillMaxSize().padding(innerPadding)
+                                ) { page ->
+                                    when (AppTab.values()[page]) {
+                                        AppTab.Home -> MainScreen(viewModel = viewModel)
+                                        AppTab.Schedules -> SchedulesScreen(viewModel = viewModel)
+                                        AppTab.Stats -> StatsScreen(viewModel = viewModel)
                                     }
                                 }
                             }
@@ -199,7 +229,6 @@ fun MainScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
     val apps by viewModel.installedApps.collectAsState()
     val selected by viewModel.selectedPackages.collectAsState()
-    val debugLastEvent by viewModel.debugLastEvent.collectAsState()
     var search by remember { mutableStateOf("") }
     var durationMinutes by remember { mutableStateOf(30) }
     var durationText by remember { mutableStateOf("30") }
@@ -208,6 +237,21 @@ fun MainScreen(viewModel: MainViewModel) {
     var showBatteryDialog by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
     val listState = rememberLazyListState()
+    val haptics = LocalHapticFeedback.current
+
+    // Задача 4.2: список "раскрывается" (карточка длительности сжимается,
+    // освобождая место), когда пользователь либо начал прокручивать список,
+    // либо закончил набирать текст (ушёл из поля — клавиатура, скорее всего,
+    // скрылась). "Липкое" состояние: один раз раскрывшись, обратно не
+    // схлопывается — иначе элементы дёргались бы туда-сюда при прокрутке
+    // вверх-вниз у самого начала списка.
+    var listExpanded by remember { mutableStateOf(false) }
+    var searchWasFocused by remember { mutableStateOf(false) }
+    var durationWasFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 }
+            .collect { scrolled -> if (scrolled) listExpanded = true }
+    }
 
     var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
@@ -279,8 +323,13 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
             }
 
-            // Время блокировки — свой ввод + быстрые пресеты
-            Column(modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp)) {
+            // Время блокировки — свой ввод + быстрые пресеты. Ряд пресетов
+            // сворачивается, когда список "раскрыт" (см. listExpanded выше) —
+            // освобождает немного места для списка приложений, но сам степпер
+            // остаётся всегда доступным.
+            Column(
+                modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp).animateContentSize()
+            ) {
                 Text("Время блокировки", color = TextSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -296,7 +345,10 @@ fun MainScreen(viewModel: MainViewModel) {
                             durationText = digits
                             digits.toIntOrNull()?.let { if (it in 1..999) durationMinutes = it }
                         },
-                        modifier = Modifier.width(110.dp),
+                        modifier = Modifier.width(110.dp).onFocusChanged { state ->
+                            if (state.isFocused) durationWasFocused = true
+                            else if (durationWasFocused) listExpanded = true
+                        },
                         singleLine = true,
                         textStyle = TextStyle(
                             color = Cyan, fontSize = 20.sp, fontWeight = FontWeight.Bold,
@@ -317,10 +369,12 @@ fun MainScreen(viewModel: MainViewModel) {
                         durationMinutes = v; durationText = v.toString()
                     }) { Icon(Icons.Default.Add, null, tint = Cyan) }
                 }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(15, 30, 60, 120).forEach { m ->
-                        DurationChip(m, m == durationMinutes) { durationMinutes = m; durationText = m.toString() }
+                if (!listExpanded) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(15, 30, 60, 120).forEach { m ->
+                            DurationChip(m, m == durationMinutes) { durationMinutes = m; durationText = m.toString() }
+                        }
                     }
                 }
             }
@@ -333,7 +387,10 @@ fun MainScreen(viewModel: MainViewModel) {
                 placeholder = { Text("Поиск приложений", color = TextSecondary) },
                 leadingIcon = { Icon(Icons.Default.Search, null, tint = TextSecondary) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().onFocusChanged { state ->
+                    if (state.isFocused) searchWasFocused = true
+                    else if (searchWasFocused) listExpanded = true
+                },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Cyan,
                     unfocusedBorderColor = TextSecondary.copy(alpha = 0.3f),
@@ -345,13 +402,6 @@ fun MainScreen(viewModel: MainViewModel) {
             )
 
             Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Диагностика: $debugLastEvent",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
 
             Text(
                 "Выбрано: ${selected.size}",
@@ -371,7 +421,7 @@ fun MainScreen(viewModel: MainViewModel) {
             Row(modifier = Modifier.weight(1f)) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).fadingEdges(listState),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
@@ -404,7 +454,10 @@ fun MainScreen(viewModel: MainViewModel) {
                         !accessibilityGranted -> showAccessibilityDialog = true
                         !overlayGranted -> showOverlayDialog = true
                         !batteryOptGranted -> showBatteryDialog = true
-                        else -> countdown = 3
+                        else -> {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            countdown = 3
+                        }
                     }
                 },
                 enabled = selected.isNotEmpty() && durationMinutes > 0 && countdown == null,
