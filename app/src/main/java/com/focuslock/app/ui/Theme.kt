@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -25,9 +26,12 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -96,6 +100,39 @@ fun Modifier.glassCard(radius: Int = 24): Modifier = this
         ),
         shape = RoundedCornerShape(radius.dp)
     )
+
+// Плавное затухание (fade) верхнего и нижнего края прокручиваемого списка —
+// создаёт ощущение, что контент продолжается за пределами видимой области,
+// вместо резкого обрыва. Каждый край показывается, только если в ту сторону
+// действительно есть что прокручивать (canScrollBackward/Forward), иначе
+// когда список весь помещается на экране, никакого "обрубленного" фейда не
+// будет видно зря.
+fun Modifier.fadingEdges(state: LazyListState, edgeHeight: androidx.compose.ui.unit.Dp = 24.dp): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val edgePx = edgeHeight.toPx()
+        if (state.canScrollBackward) {
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, Color.Black),
+                    startY = 0f,
+                    endY = edgePx
+                ),
+                blendMode = BlendMode.DstIn
+            )
+        }
+        if (state.canScrollForward) {
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color.Black, Color.Transparent),
+                    startY = size.height - edgePx,
+                    endY = size.height
+                ),
+                blendMode = BlendMode.DstIn
+            )
+        }
+    }
 
 // ===== Зернистость (film grain) =====
 // Один раз генерируем маленькую шумовую текстуру и тайлим её поверх фона —
