@@ -85,7 +85,12 @@ data class Schedule(
     }
 }
 
-data class EffectiveBlockState(val active: Boolean, val blockedPackages: Set<String>, val segmentEnd: Long)
+data class EffectiveBlockState(
+    val active: Boolean,
+    val blockedPackages: Set<String>,
+    val segmentStart: Long,
+    val segmentEnd: Long
+)
 
 // ===== JSON (тот же стиль, что и SESSION_HISTORY в AppData.kt) =====
 
