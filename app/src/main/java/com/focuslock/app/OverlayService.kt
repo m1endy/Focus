@@ -143,10 +143,14 @@ class OverlayService : Service() {
         // Оборачиваем в FrameLayout и перехватываем Back уже на нём.
         val composeView = ComposeView(this).apply {
             setContent {
-                OverlayContent(endTime = effective.segmentEnd, onExpired = {
-                    LockRepository.clearBlockingState(this@OverlayService)
-                    stopSelf()
-                })
+                OverlayContent(
+                    startTime = effective.segmentStart,
+                    endTime = effective.segmentEnd,
+                    onExpired = {
+                        LockRepository.clearBlockingState(this@OverlayService)
+                        stopSelf()
+                    }
+                )
             }
         }
 
@@ -174,11 +178,29 @@ class OverlayService : Service() {
 
         try {
             wm.addView(rootView, params)
+            hideSystemBars(rootView)
+            // Лёгкий тактильный отклик в момент появления экрана блокировки.
+            // Не Compose-дерево (это ComposeView добавляется напрямую через
+            // WindowManager), поэтому используем View.performHapticFeedback, а не
+            // LocalHapticFeedback — без FLAG_IGNORE_GLOBAL_SETTING, чтобы уважать
+            // системную настройку "виброотклик", если пользователь её выключил.
+            rootView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
             LockRepository.writeDebugEvent(this, "Оверлей добавлен успешно")
         } catch (e: Exception) {
             LockRepository.writeDebugEvent(this, "Ошибка addView: ${e.javaClass.simpleName}: ${e.message}")
             stopSelf()
         }
+    }
+
+    // Полноэкранный режим (скрывает статус-бар и нижнюю системную панель).
+    // Это только про видимость системных панелей — на перехват кнопки/жеста
+    // "Назад" (dispatchKeyEvent на rootView выше) никак не влияет, он
+    // продолжает работать как раньше.
+    private fun hideSystemBars(view: View) {
+        val controller = androidx.core.view.ViewCompat.getWindowInsetsController(view) ?: return
+        controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
     override fun onDestroy() {
@@ -229,9 +251,14 @@ class OverlayService : Service() {
 }
 
 @Composable
-fun OverlayContent(endTime: Long, onExpired: () -> Unit) {
+fun OverlayContent(startTime: Long, endTime: Long, onExpired: () -> Unit) {
     var remaining by remember { mutableStateOf(((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)) }
-    val totalDuration = remember { ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(1) }
+    // Длительность ВСЕЙ текущей сессии блокировки (от startTime до endTime), а
+    // НЕ время, оставшееся на момент открытия экрана. Раньше totalDuration
+    // считался как remember { оставшееся_время_сейчас }, поэтому при каждом
+    // открытии заблокированного приложения индикатор считал, будто сессия
+    // только что началась — даже если она уже шла долгое время.
+    val totalDurationSec = remember(startTime, endTime) { ((endTime - startTime) / 1000).coerceAtLeast(1) }
 
     LaunchedEffect(endTime) {
         while (true) {
@@ -245,7 +272,11 @@ fun OverlayContent(endTime: Long, onExpired: () -> Unit) {
         }
     }
 
-    val targetProgress = (remaining.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
+    // Круг заполняется по мере прохождения ВСЕЙ сессии и становится полным
+    // ровно к её концу — не зависит от того, в какой момент пользователь
+    // открыл заблокированное приложение и увидел этот экран.
+    val elapsedSec = (totalDurationSec - remaining).coerceIn(0L, totalDurationSec)
+    val targetProgress = (elapsedSec.toFloat() / totalDurationSec.toFloat()).coerceIn(0f, 1f)
     // remaining меняется раз в секунду, поэтому дуга раньше "прыгала".
     // Анимируем переход между значениями линейно за то же время (1с) —
     // визуально дуга крутится плавно, а не скачками.
