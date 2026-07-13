@@ -1,7 +1,13 @@
 package com.focuslock.app
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,6 +41,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -51,6 +59,7 @@ import com.focuslock.app.ui.OrganicBackground
 import com.focuslock.app.ui.TextPrimary
 import com.focuslock.app.ui.TextSecondary
 import com.focuslock.app.ui.glassCard
+import com.focuslock.app.ui.swipeToChange
 
 @Composable
 fun StatsScreen(viewModel: MainViewModel) {
@@ -58,8 +67,14 @@ fun StatsScreen(viewModel: MainViewModel) {
     val apps by viewModel.installedApps.collectAsState()
     val appsByPackage = remember(apps) { apps.associateBy { it.packageName } }
     var period by remember { mutableStateOf(StatsPeriod.TODAY) }
+    val haptics = LocalHapticFeedback.current
 
-    val stats = remember(sessions, period) { computeStats(sessions, period) }
+    fun changePeriod(next: StatsPeriod) {
+        if (next != period) {
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            period = next
+        }
+    }
 
     OrganicBackground {
         Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
@@ -71,32 +86,63 @@ fun StatsScreen(viewModel: MainViewModel) {
                 modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
             )
 
-            PeriodSelector(selected = period, onSelect = { period = it })
+            PeriodSelector(selected = period, onSelect = { changePeriod(it) })
             Spacer(Modifier.height(16.dp))
 
-            TotalStatCard(totalMinutes = stats.totalMinutes, period = period)
-            Spacer(Modifier.height(20.dp))
-
-            if (stats.perApp.isEmpty()) {
-                EmptyStatsState()
-            } else {
-                Text(
-                    "По приложениям",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(bottom = 10.dp)
-                )
-                val maxMinutes = stats.perApp.first().minutes.coerceAtLeast(1)
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(stats.perApp, key = { it.packageName }) { stat ->
-                        AppStatRow(
-                            appInfo = appsByPackage[stat.packageName],
-                            packageName = stat.packageName,
-                            minutes = stat.minutes,
-                            fraction = stat.minutes.toFloat() / maxMinutes.toFloat()
-                        )
+            // Кнопки выше продолжают работать как раньше; вдобавок весь блок
+            // ниже можно пролистать свайпом влево/вправо — как страницы между
+            // периодами, с анимацией скольжения в нужную сторону.
+            AnimatedContent(
+                targetState = period,
+                modifier = Modifier
+                    .weight(1f)
+                    .swipeToChange(
+                        onSwipeLeft = {
+                            StatsPeriod.values().getOrNull(period.ordinal + 1)?.let { changePeriod(it) }
+                        },
+                        onSwipeRight = {
+                            StatsPeriod.values().getOrNull(period.ordinal - 1)?.let { changePeriod(it) }
+                        }
+                    ),
+                transitionSpec = {
+                    val forward = targetState.ordinal > initialState.ordinal
+                    if (forward) {
+                        (slideInHorizontally(initialOffsetX = { it }) + fadeIn())
+                            .togetherWith(slideOutHorizontally(targetOffsetX = { -it }) + fadeOut())
+                    } else {
+                        (slideInHorizontally(initialOffsetX = { -it }) + fadeIn())
+                            .togetherWith(slideOutHorizontally(targetOffsetX = { it }) + fadeOut())
                     }
-                    item { Spacer(Modifier.height(90.dp)) }
+                },
+                label = "statsPeriodContent"
+            ) { p ->
+                val stats = remember(sessions, p) { computeStats(sessions, p) }
+                Column(modifier = Modifier.fillMaxSize()) {
+                    TotalStatCard(totalMinutes = stats.totalMinutes, period = p)
+                    Spacer(Modifier.height(20.dp))
+
+                    if (stats.perApp.isEmpty()) {
+                        EmptyStatsState()
+                    } else {
+                        Text(
+                            "По приложениям",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(bottom = 10.dp)
+                        )
+                        val maxMinutes = stats.perApp.first().minutes.coerceAtLeast(1)
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(stats.perApp, key = { it.packageName }) { stat ->
+                                AppStatRow(
+                                    appInfo = appsByPackage[stat.packageName],
+                                    packageName = stat.packageName,
+                                    minutes = stat.minutes,
+                                    fraction = stat.minutes.toFloat() / maxMinutes.toFloat()
+                                )
+                            }
+                            item { Spacer(Modifier.height(90.dp)) }
+                        }
+                    }
                 }
             }
         }
