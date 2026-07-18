@@ -108,6 +108,30 @@ class MainActivity : ComponentActivity() {
                 val pagerState = rememberPagerState(pageCount = { AppTab.values().size })
                 val scope = rememberCoroutineScope()
                 val haptics = LocalHapticFeedback.current
+                val context = LocalContext.current
+
+                // Разрешения проверяются один раз, здесь, на самом верху — а не
+                // внутри вкладки "Домой". Пока хоть одно не выдано, вместо вкладок
+                // показывается мастер настройки: это гарантирует, что к моменту,
+                // когда пользователь вообще видит список приложений и кнопку
+                // "Начать блокировку", служба уже способна реально заблокировать
+                // экран, а не просто запустить таймер вхолостую.
+                var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
+                var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
+                var batteryOptGranted by remember { mutableStateOf(hasBatteryOptimizationExemption(context)) }
+                val lifecycleOwner = LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            accessibilityGranted = isAccessibilityServiceEnabled(context)
+                            overlayGranted = hasOverlayPermission(context)
+                            batteryOptGranted = hasBatteryOptimizationExemption(context)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                }
+                val setupComplete = accessibilityGranted && overlayGranted && batteryOptGranted
 
                 // Лёгкий тактильный отклик при смене вкладки — срабатывает и от
                 // нажатия на нижнюю панель, и от свайпа, потому что оба способа
@@ -120,36 +144,48 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val screen = when {
+                    isBlocking -> RootScreen.Blocking
+                    !setupComplete -> RootScreen.Wizard
+                    else -> RootScreen.Main
+                }
+
                 Surface(modifier = Modifier.fillMaxSize(), color = DeepBlack) {
-                    Crossfade(targetState = isBlocking, label = "nav") { blocking ->
-                        if (blocking) {
-                            ActiveBlockScreen(endTime = endTime, onExpired = { viewModel.stopBlocking() })
-                        } else {
-                            // Вкладки доступны только вне активной блокировки — во время
-                            // фокус-сессии экран нарочно "одноцелевой", без навигации.
-                            Scaffold(
-                                containerColor = Color.Transparent,
-                                bottomBar = {
-                                    FocusLockBottomBar(
-                                        currentTab = AppTab.values()[pagerState.currentPage],
-                                        onTabSelected = { tab ->
-                                            scope.launch { pagerState.animateScrollToPage(tab.ordinal) }
+                    Crossfade(targetState = screen, label = "nav") { s ->
+                        when (s) {
+                            RootScreen.Blocking -> ActiveBlockScreen(endTime = endTime, onExpired = { viewModel.stopBlocking() })
+                            RootScreen.Wizard -> PermissionWizardScreen(
+                                accessibilityGranted = accessibilityGranted,
+                                overlayGranted = overlayGranted,
+                                batteryOptGranted = batteryOptGranted
+                            )
+                            RootScreen.Main -> {
+                                // Вкладки доступны только вне активной блокировки — во время
+                                // фокус-сессии экран нарочно "одноцелевой", без навигации.
+                                Scaffold(
+                                    containerColor = Color.Transparent,
+                                    bottomBar = {
+                                        FocusLockBottomBar(
+                                            currentTab = AppTab.values()[pagerState.currentPage],
+                                            onTabSelected = { tab ->
+                                                scope.launch { pagerState.animateScrollToPage(tab.ordinal) }
+                                            }
+                                        )
+                                    }
+                                ) { innerPadding ->
+                                    // Свайп между вкладками (Блокировка ←→ Расписания ←→
+                                    // Статистика), как в Telegram. Нижняя навигация выше не
+                                    // ломается — она просто просит pager анимированно
+                                    // перейти на нужную страницу.
+                                    HorizontalPager(
+                                        state = pagerState,
+                                        modifier = Modifier.fillMaxSize().padding(innerPadding)
+                                    ) { page ->
+                                        when (AppTab.values()[page]) {
+                                            AppTab.Home -> MainScreen(viewModel = viewModel)
+                                            AppTab.Schedules -> SchedulesScreen(viewModel = viewModel)
+                                            AppTab.Stats -> StatsScreen(viewModel = viewModel)
                                         }
-                                    )
-                                }
-                            ) { innerPadding ->
-                                // Свайп между вкладками (Блокировка ←→ Расписания ←→
-                                // Статистика), как в Telegram. Нижняя навигация выше не
-                                // ломается — она просто просит pager анимированно
-                                // перейти на нужную страницу.
-                                HorizontalPager(
-                                    state = pagerState,
-                                    modifier = Modifier.fillMaxSize().padding(innerPadding)
-                                ) { page ->
-                                    when (AppTab.values()[page]) {
-                                        AppTab.Home -> MainScreen(viewModel = viewModel)
-                                        AppTab.Schedules -> SchedulesScreen(viewModel = viewModel)
-                                        AppTab.Stats -> StatsScreen(viewModel = viewModel)
                                     }
                                 }
                             }
@@ -160,6 +196,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+enum class RootScreen { Blocking, Wizard, Main }
 
 enum class AppTab { Home, Schedules, Stats }
 
@@ -226,15 +264,11 @@ private fun BottomBarItem(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
-    val context = LocalContext.current
     val apps by viewModel.installedApps.collectAsState()
     val selected by viewModel.selectedPackages.collectAsState()
     var search by remember { mutableStateOf("") }
     var durationMinutes by remember { mutableStateOf(30) }
     var durationText by remember { mutableStateOf("30") }
-    var showAccessibilityDialog by remember { mutableStateOf(false) }
-    var showOverlayDialog by remember { mutableStateOf(false) }
-    var showBatteryDialog by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
     val listState = rememberLazyListState()
     val haptics = LocalHapticFeedback.current
@@ -251,25 +285,6 @@ fun MainScreen(viewModel: MainViewModel) {
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 }
             .collect { scrolled -> if (scrolled) listExpanded = true }
-    }
-
-    var accessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
-    var overlayGranted by remember { mutableStateOf(hasOverlayPermission(context)) }
-    var batteryOptGranted by remember { mutableStateOf(hasBatteryOptimizationExemption(context)) }
-
-    // Разрешения — особые, выдаются в системных настройках. Перепроверяем их
-    // каждый раз, когда пользователь возвращается в приложение (например, из настроек).
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                accessibilityGranted = isAccessibilityServiceEnabled(context)
-                overlayGranted = hasOverlayPermission(context)
-                batteryOptGranted = hasBatteryOptimizationExemption(context)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val filtered = remember(apps, search) {
@@ -304,24 +319,6 @@ fun MainScreen(viewModel: MainViewModel) {
                 fontSize = 14.sp,
                 modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
             )
-
-            AnimatedVisibility(
-                visible = !accessibilityGranted || !overlayGranted || !batteryOptGranted,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Column {
-                    PermissionsCard(
-                        accessibilityGranted = accessibilityGranted,
-                        overlayGranted = overlayGranted,
-                        batteryOptGranted = batteryOptGranted,
-                        onAccessibilityClick = { showAccessibilityDialog = true },
-                        onOverlayClick = { showOverlayDialog = true },
-                        onBatteryClick = { showBatteryDialog = true }
-                    )
-                    Spacer(Modifier.height(16.dp))
-                }
-            }
 
             // Время блокировки — свой ввод + быстрые пресеты. Ряд пресетов
             // сворачивается, когда список "раскрыт" (см. listExpanded выше) —
@@ -403,12 +400,33 @@ fun MainScreen(viewModel: MainViewModel) {
 
             Spacer(Modifier.height(12.dp))
 
-            Text(
-                "Выбрано: ${selected.size}",
-                color = TextSecondary,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Выбрано: ${selected.size}", color = TextSecondary, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            viewModel.selectAll()
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("Выбрать всё", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    TextButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            viewModel.deselectAll()
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("Снять всё", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
 
             // Список приложений + "ползунок" быстрой прокрутки рядом с ним (листать
             // вручную десятки приложений неудобно — ползунком можно перейти сразу
@@ -450,15 +468,8 @@ fun MainScreen(viewModel: MainViewModel) {
             Button(
                 onClick = {
                     if (selected.isEmpty() || durationMinutes <= 0) return@Button
-                    when {
-                        !accessibilityGranted -> showAccessibilityDialog = true
-                        !overlayGranted -> showOverlayDialog = true
-                        !batteryOptGranted -> showBatteryDialog = true
-                        else -> {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            countdown = 3
-                        }
-                    }
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    countdown = 3
                 },
                 enabled = selected.isNotEmpty() && durationMinutes > 0 && countdown == null,
                 modifier = Modifier
@@ -495,133 +506,6 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
             }
         }
-
-        if (showAccessibilityDialog) {
-            AlertDialog(
-                onDismissRequest = { showAccessibilityDialog = false },
-                containerColor = CardBlack,
-                title = { Text("Нужен доступ", color = TextPrimary) },
-                text = {
-                    Text(
-                        "Чтобы блокировка работала, включите службу «FocusLock» в Специальных возможностях.",
-                        color = TextSecondary
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showAccessibilityDialog = false
-                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                    }) { Text("Открыть настройки", color = Cyan) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showAccessibilityDialog = false }) {
-                        Text("Отмена", color = TextSecondary)
-                    }
-                }
-            )
-        }
-
-        if (showOverlayDialog) {
-            AlertDialog(
-                onDismissRequest = { showOverlayDialog = false },
-                containerColor = CardBlack,
-                title = { Text("Нужен доступ", color = TextPrimary) },
-                text = {
-                    Text(
-                        "Чтобы экран блокировки мог появляться поверх других приложений, разрешите FocusLock «Отображение поверх других приложений».",
-                        color = TextSecondary
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showOverlayDialog = false
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                        )
-                    }) { Text("Открыть настройки", color = Cyan) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showOverlayDialog = false }) {
-                        Text("Отмена", color = TextSecondary)
-                    }
-                }
-            )
-        }
-
-        if (showBatteryDialog) {
-            AlertDialog(
-                onDismissRequest = { showBatteryDialog = false },
-                containerColor = CardBlack,
-                title = { Text("Нужен доступ", color = TextPrimary) },
-                text = {
-                    Text(
-                        "Система может «замораживать» FocusLock в фоне и обрывать блокировку. Разрешите работу без ограничений по батарее. На Xiaomi/MIUI после этого диалога также зайдите в Настройки → Приложения → FocusLock → Автозапуск и включите его, а в разделе «Другие разрешения» включите «Показ всплывающих окон в фоновом режиме» — без этого MIUI всё равно может блокировать оверлей.",
-                        color = TextSecondary
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showBatteryDialog = false
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                        )
-                    }) { Text("Открыть настройки", color = Cyan) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showBatteryDialog = false }) {
-                        Text("Отмена", color = TextSecondary)
-                    }
-                }
-            )
-        }
-    }
-}
-
-@Composable
-fun PermissionsCard(
-    accessibilityGranted: Boolean,
-    overlayGranted: Boolean,
-    batteryOptGranted: Boolean,
-    onAccessibilityClick: () -> Unit,
-    onOverlayClick: () -> Unit,
-    onBatteryClick: () -> Unit
-) {
-    Column(modifier = Modifier.fillMaxWidth().glassCard(16).padding(16.dp)) {
-        Text("Нужна настройка перед стартом", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(10.dp))
-        PermissionRow("Специальные возможности", accessibilityGranted, onAccessibilityClick)
-        Spacer(Modifier.height(8.dp))
-        PermissionRow("Поверх других приложений", overlayGranted, onOverlayClick)
-        Spacer(Modifier.height(8.dp))
-        PermissionRow("Без ограничений по батарее", batteryOptGranted, onBatteryClick)
-    }
-}
-
-@Composable
-fun PermissionRow(label: String, granted: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = !granted) { onClick() },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            GlassIconBadge(
-                icon = if (granted) Icons.Default.CheckCircle else Icons.Default.Warning,
-                sizeDp = 30,
-                accent = if (granted) Cyan else DangerRed
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(label, color = TextPrimary, fontSize = 14.sp)
-        }
-        if (!granted) Text("Включить", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
