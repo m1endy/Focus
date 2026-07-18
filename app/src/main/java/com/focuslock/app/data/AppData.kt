@@ -464,6 +464,20 @@ class MainViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch { repo.saveSelection(current) }
     }
 
+    // Массовые операции — одно обновление состояния и одна запись в DataStore
+    // независимо от количества приложений (а не toggleApp в цикле по одному),
+    // поэтому остаются быстрыми даже при сотнях установленных приложений.
+    fun selectAll() {
+        val all = _installedApps.value.map { it.packageName }.toSet()
+        _selectedPackages.value = all
+        viewModelScope.launch { repo.saveSelection(all) }
+    }
+
+    fun deselectAll() {
+        _selectedPackages.value = emptySet()
+        viewModelScope.launch { repo.saveSelection(emptySet()) }
+    }
+
     fun startBlocking(durationMillis: Long) {
         viewModelScope.launch { repo.startBlock(durationMillis) }
     }
